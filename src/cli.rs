@@ -153,12 +153,7 @@ pub fn execute_args(
         let (output, pool_size, entropy) = if args.passphrase {
             match generate_passphrase(&pass_cfg) {
                 Ok((passphrase, pool_size)) => {
-                    let words = if args.words == 0 {
-                        crate::passphrase::DEFAULT_PASSPHRASE_WORD_COUNT
-                    } else {
-                        args.words
-                    };
-                    let entropy = calculate_passphrase_entropy(words, pool_size);
+                    let entropy = calculate_passphrase_entropy(args.words, pool_size);
                     (passphrase, pool_size, entropy)
                 }
                 Err(err) => {
@@ -209,7 +204,7 @@ pub fn execute_args(
 
     if args.copy {
         let mut clipboard_text = results.join("\n");
-        handle_copy(&clipboard_text);
+        handle_copy(&clipboard_text, stderr);
         clipboard_text.zeroize();
     }
 
@@ -220,10 +215,14 @@ pub fn execute_args(
     Ok(())
 }
 
-fn handle_copy(text: &str) {
+fn handle_copy(text: &str, stderr: &mut dyn std::io::Write) {
     match copy_to_clipboard(text) {
-        Ok(()) => eprintln!("✓ Copied to clipboard"),
-        Err(e) => eprintln!("Warning: {}", e),
+        Ok(()) => {
+            writeln!(stderr, "✓ Copied to clipboard").ok();
+        }
+        Err(e) => {
+            writeln!(stderr, "Warning: {}", e).ok();
+        }
     }
 }
 
@@ -241,11 +240,6 @@ fn print_entropy_diagnostics_to(
         entropy, rating, shannon, pool_size
     )
     .ok();
-}
-
-#[allow(dead_code)]
-fn print_entropy_diagnostics(output: &str, entropy: f64, pool_size: usize) {
-    print_entropy_diagnostics_to(output, entropy, pool_size, &mut std::io::stderr());
 }
 
 #[cfg(test)]
@@ -439,5 +433,24 @@ mod tests {
         let mut s = "super_secret_password".to_string();
         s.zeroize();
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn test_handle_copy_writes_to_stderr() {
+        let mut stderr = Vec::new();
+        handle_copy("test-password", &mut stderr);
+        let out = String::from_utf8(stderr).unwrap();
+        assert!(out.contains("✓ Copied to clipboard") || out.contains("Warning:"));
+    }
+
+    #[test]
+    fn test_execute_with_copy() {
+        let args = Args::try_parse_from(["rustpass", "--copy"]).unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = execute_args(&args, &mut stdout, &mut stderr);
+        assert_eq!(res, Ok(()));
+        let err_out = String::from_utf8(stderr).unwrap();
+        assert!(err_out.contains("✓ Copied to clipboard") || err_out.contains("Warning:"));
     }
 }
