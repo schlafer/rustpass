@@ -11,7 +11,7 @@ const CLIPBOARD_COMMANDS: &[(&str, &[&str])] = &[
 
 /// Formats the OSC 52 sequence for the given text.
 /// If `is_tmux` is true, wraps the sequence in a tmux passthrough sequence.
-pub(crate) fn format_osc52_sequence(text: &str, is_tmux: bool) -> String {
+fn format_osc52_sequence(text: &str, is_tmux: bool) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     if is_tmux {
         format!("\x1bPtmux;\x1b\x1b]52;c;{}\x07\x1b\\", encoded)
@@ -21,32 +21,30 @@ pub(crate) fn format_osc52_sequence(text: &str, is_tmux: bool) -> String {
 }
 
 /// Writes the OSC 52 sequence to `/dev/tty` if available, or falls back to stderr.
-pub(crate) fn write_osc52(text: &str) -> Result<(), String> {
+fn write_osc52(text: &str) -> Result<(), String> {
     let is_tmux = std::env::var_os("TMUX").is_some();
     let seq = format_osc52_sequence(text, is_tmux);
 
     if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
         tty.write_all(seq.as_bytes()).map_err(|e| e.to_string())?;
         tty.flush().map_err(|e| e.to_string())?;
+        Ok(())
     } else {
         let mut stderr = std::io::stderr();
         stderr
             .write_all(seq.as_bytes())
             .map_err(|e| e.to_string())?;
         stderr.flush().map_err(|e| e.to_string())?;
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Copies text to the system clipboard.
 ///
 /// Tries platform-native tools in order (`wl-copy`, `xclip`, `xsel`, `pbcopy`, `clip.exe`).
-/// Also emits an OSC 52 escape sequence so terminal emulators / SSH sessions receive it.
-/// If either a native tool or OSC 52 succeeds, returns `Ok(())`.
+/// If a native tool succeeds, returns `Ok(())` immediately.
+/// Otherwise, falls back to emitting an OSC 52 escape sequence.
 pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let mut tool_success = false;
-
     for (cmd, args) in CLIPBOARD_COMMANDS {
         let spawned = std::process::Command::new(cmd)
             .args(*args)
@@ -62,19 +60,17 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
             }
             if let Ok(status) = child.wait() {
                 if status.success() {
-                    tool_success = true;
-                    break;
+                    return Ok(());
                 }
             }
         }
     }
 
-    let osc_err = write_osc52(text);
-    if tool_success || osc_err.is_ok() {
-        Ok(())
-    } else {
-        Err("could not copy to clipboard (install xclip, wl-copy, or use an OSC 52 compatible terminal)".to_string())
-    }
+    // Fall back to OSC 52 only if all native tools fail
+    write_osc52(text).map_err(|_| {
+        "could not copy to clipboard (install xclip, wl-copy, or use an OSC 52 compatible terminal)"
+            .to_string()
+    })
 }
 
 #[cfg(test)]
