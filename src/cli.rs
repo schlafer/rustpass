@@ -3,6 +3,7 @@ use std::process;
 use clap::Parser;
 
 use crate::generator::{generate, Config};
+use crate::passphrase::{generate_passphrase, PassphraseConfig};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -98,34 +99,54 @@ pub fn run() {
         process::exit(0);
     }
 
-    if args.length == 0 {
-        eprintln!("Error: password length must be greater than 0");
-        process::exit(1);
-    }
+    if args.passphrase {
+        let pass_cfg = PassphraseConfig {
+            word_count: args.words,
+            separator: args.separator,
+            capitalize: args.capitalize,
+            include_number: args.include_number,
+            word_list: None,
+        };
 
-    let cfg = Config {
-        length: args.length,
-        no_upper: args.no_upper,
-        no_lower: args.no_lower,
-        no_digits: args.no_digits,
-        no_symbols: args.no_symbols,
-        only_alphanumeric: args.only_alphanumeric,
-        symbols: if args.symbols.is_empty() {
-            crate::generator::DEFAULT_SYMBOLS.to_string()
-        } else {
-            args.symbols
-        },
-        exclude_ambiguous: args.exclude_ambiguous,
-        exclude_chars: args.exclude,
-    };
-
-    match generate(&cfg) {
-        Ok((password, _pool_size)) => {
-            println!("{}", password);
+        match generate_passphrase(&pass_cfg) {
+            Ok((passphrase, _wordlist_len)) => {
+                println!("{}", passphrase);
+            }
+            Err(err) => {
+                eprintln!("Error: {}", err);
+                process::exit(1);
+            }
         }
-        Err(err) => {
-            eprintln!("Error: {}", err);
+    } else {
+        if args.length == 0 {
+            eprintln!("Error: password length must be greater than 0");
             process::exit(1);
+        }
+
+        let cfg = Config {
+            length: args.length,
+            no_upper: args.no_upper,
+            no_lower: args.no_lower,
+            no_digits: args.no_digits,
+            no_symbols: args.no_symbols,
+            only_alphanumeric: args.only_alphanumeric,
+            symbols: if args.symbols.is_empty() {
+                crate::generator::DEFAULT_SYMBOLS.to_string()
+            } else {
+                args.symbols
+            },
+            exclude_ambiguous: args.exclude_ambiguous,
+            exclude_chars: args.exclude,
+        };
+
+        match generate(&cfg) {
+            Ok((password, _pool_size)) => {
+                println!("{}", password);
+            }
+            Err(err) => {
+                eprintln!("Error: {}", err);
+                process::exit(1);
+            }
         }
     }
 }
