@@ -2,6 +2,7 @@ use std::process;
 
 use clap::Parser;
 
+use crate::entropy::{calculate_entropy, calculate_passphrase_entropy, strength_rating};
 use crate::generator::{generate, Config};
 use crate::passphrase::{generate_passphrase, PassphraseConfig};
 
@@ -109,8 +110,24 @@ pub fn run() {
         };
 
         match generate_passphrase(&pass_cfg) {
-            Ok((passphrase, _wordlist_len)) => {
-                println!("{}", passphrase);
+            Ok((passphrase, pool_size)) => {
+                if args.entropy {
+                    let entropy = calculate_passphrase_entropy(args.words, pool_size);
+                    let rating = strength_rating(entropy);
+                    if args.count == 1 {
+                        println!(
+                            "Password:  {}\nEntropy:   {:.1} bits ({})\nPool Size: {}",
+                            passphrase, entropy, rating, pool_size
+                        );
+                    } else {
+                        println!(
+                            "{:<24} [Entropy: {:.1} bits, Strength: {}]",
+                            passphrase, entropy, rating
+                        );
+                    }
+                } else {
+                    println!("{}", passphrase);
+                }
             }
             Err(err) => {
                 eprintln!("Error: {}", err);
@@ -140,13 +157,47 @@ pub fn run() {
         };
 
         match generate(&cfg) {
-            Ok((password, _pool_size)) => {
-                println!("{}", password);
+            Ok((password, pool_size)) => {
+                if args.entropy {
+                    let entropy = calculate_entropy(&password, pool_size);
+                    let rating = strength_rating(entropy);
+                    if args.count == 1 {
+                        println!(
+                            "Password:  {}\nEntropy:   {:.1} bits ({})\nPool Size: {}",
+                            password, entropy, rating, pool_size
+                        );
+                    } else {
+                        println!(
+                            "{:<24} [Entropy: {:.1} bits, Strength: {}]",
+                            password, entropy, rating
+                        );
+                    }
+                } else {
+                    println!("{}", password);
+                }
             }
             Err(err) => {
                 eprintln!("Error: {}", err);
                 process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_args_entropy_flags() {
+        let args = Args::try_parse_from(["rustpass", "-E"]).unwrap();
+        assert!(args.entropy);
+
+        let args = Args::try_parse_from(["rustpass", "--entropy"]).unwrap();
+        assert!(args.entropy);
+
+        let args = Args::try_parse_from(["rustpass"]).unwrap();
+        assert!(!args.entropy);
     }
 }

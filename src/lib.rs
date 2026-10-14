@@ -5,6 +5,10 @@ pub mod generator;
 pub mod passphrase;
 pub mod wordlist;
 
+pub use entropy::{
+    calculate_entropy, calculate_passphrase_entropy, estimate_pool_size, shannon_entropy,
+    strength_rating,
+};
 pub use generator::{
     default_config, generate, secure_random, shuffle, Config, AMBIGUOUS_CHARS, DEFAULT_LENGTH,
     DEFAULT_SYMBOLS,
