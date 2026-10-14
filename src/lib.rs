@@ -5,6 +5,7 @@ pub mod generator;
 pub mod passphrase;
 pub mod wordlist;
 
+pub use clipboard::copy_to_clipboard;
 pub use entropy::{
     calculate_entropy, calculate_passphrase_entropy, estimate_pool_size, shannon_entropy,
     strength_rating,

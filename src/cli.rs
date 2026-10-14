@@ -2,6 +2,7 @@ use std::process;
 
 use clap::Parser;
 
+use crate::clipboard::copy_to_clipboard;
 use crate::entropy::{
     calculate_entropy, calculate_passphrase_entropy, shannon_entropy, strength_rating,
 };
@@ -118,6 +119,9 @@ pub fn run() {
                     let entropy = calculate_passphrase_entropy(args.words, pool_size);
                     print_entropy_diagnostics(&passphrase, entropy, pool_size);
                 }
+                if args.copy {
+                    handle_copy(&passphrase);
+                }
             }
             Err(err) => {
                 eprintln!("Error: {}", err);
@@ -153,12 +157,22 @@ pub fn run() {
                     let entropy = calculate_entropy(&password, pool_size);
                     print_entropy_diagnostics(&password, entropy, pool_size);
                 }
+                if args.copy {
+                    handle_copy(&password);
+                }
             }
             Err(err) => {
                 eprintln!("Error: {}", err);
                 process::exit(1);
             }
         }
+    }
+}
+
+fn handle_copy(text: &str) {
+    match copy_to_clipboard(text) {
+        Ok(()) => eprintln!("✓ Copied to clipboard"),
+        Err(e) => eprintln!("Warning: {}", e),
     }
 }
 
@@ -186,5 +200,17 @@ mod tests {
 
         let args = Args::try_parse_from(["rustpass"]).unwrap();
         assert!(!args.entropy);
+    }
+
+    #[test]
+    fn test_args_copy_flags() {
+        let args = Args::try_parse_from(["rustpass", "-c"]).unwrap();
+        assert!(args.copy);
+
+        let args = Args::try_parse_from(["rustpass", "--copy"]).unwrap();
+        assert!(args.copy);
+
+        let args = Args::try_parse_from(["rustpass"]).unwrap();
+        assert!(!args.copy);
     }
 }
