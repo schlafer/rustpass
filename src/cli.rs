@@ -99,7 +99,7 @@ pub fn run() {
     }
 
     if args.length == 0 {
-        eprintln!("Length must be greater than 0");
+        eprintln!("Error: password length must be greater than 0");
         process::exit(1);
     }
 
@@ -110,7 +110,11 @@ pub fn run() {
         no_digits: args.no_digits,
         no_symbols: args.no_symbols,
         only_alphanumeric: args.only_alphanumeric,
-        symbols: args.symbols,
+        symbols: if args.symbols.is_empty() {
+            crate::generator::DEFAULT_SYMBOLS.to_string()
+        } else {
+            args.symbols
+        },
         exclude_ambiguous: args.exclude_ambiguous,
         exclude_chars: args.exclude,
     };

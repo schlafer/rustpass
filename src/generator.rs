@@ -50,6 +50,15 @@ pub fn shuffle(chars: &mut Vec<char>) {
     }
 }
 
+fn filter_group(charset: &str, exclude_ambiguous: bool, exclude_chars: &str) -> String {
+    charset
+        .chars()
+        .filter(|&c| {
+            (!exclude_ambiguous || !AMBIGUOUS_CHARS.contains(c)) && !exclude_chars.contains(c)
+        })
+        .collect()
+}
+
 pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
     if cfg.length == 0 {
         return Err("password length must be greater than 0".to_string());
@@ -57,25 +66,66 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
 
     let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let lower = "abcdefghijklmnopqrstuvwxyz";
-    let nums = "0123456789";
-    let special = "!@#$*_";
+    let digits = "0123456789";
+    let symbols = if cfg.symbols.is_empty() {
+        DEFAULT_SYMBOLS
+    } else {
+        &cfg.symbols
+    };
 
-    let groups: Vec<&str> = vec![upper, lower, nums, special];
-    let pool_size = upper.len() + lower.len() + nums.len() + special.len();
+    let mut active_groups: Vec<String> = Vec::new();
 
-    let base = cfg.length / 4;
-    let remainder = cfg.length % 4;
+    if !cfg.no_upper {
+        let filtered = filter_group(upper, cfg.exclude_ambiguous, &cfg.exclude_chars);
+        if !filtered.is_empty() {
+            active_groups.push(filtered);
+        }
+    }
+
+    if !cfg.no_lower {
+        let filtered = filter_group(lower, cfg.exclude_ambiguous, &cfg.exclude_chars);
+        if !filtered.is_empty() {
+            active_groups.push(filtered);
+        }
+    }
+
+    if !cfg.no_digits {
+        let filtered = filter_group(digits, cfg.exclude_ambiguous, &cfg.exclude_chars);
+        if !filtered.is_empty() {
+            active_groups.push(filtered);
+        }
+    }
+
+    if !cfg.no_symbols && !cfg.only_alphanumeric {
+        let filtered = filter_group(symbols, cfg.exclude_ambiguous, &cfg.exclude_chars);
+        if !filtered.is_empty() {
+            active_groups.push(filtered);
+        }
+    }
+
+    if active_groups.is_empty() {
+        return Err(
+            "character pool is empty; verify your inclusion and exclusion options".to_string(),
+        );
+    }
+
+    let pool_size: usize = active_groups.iter().map(|g| g.chars().count()).sum();
+
+    let num_groups = active_groups.len();
+    let base = cfg.length / num_groups;
+    let remainder = cfg.length % num_groups;
 
     let mut pass: Vec<char> = Vec::with_capacity(cfg.length);
 
-    for (g, group) in groups.iter().enumerate() {
+    for (g, group) in active_groups.iter().enumerate() {
         let mut this_len = base;
         if g < remainder {
             this_len += 1;
         }
+        let group_chars: Vec<char> = group.chars().collect();
         for _ in 0..this_len {
-            let idx = secure_random(0, group.len() - 1);
-            pass.push(group.chars().nth(idx).unwrap());
+            let idx = secure_random(0, group_chars.len() - 1);
+            pass.push(group_chars[idx]);
         }
     }
 
@@ -98,7 +148,7 @@ mod tests {
     fn test_secure_random_in_range() {
         for _ in 0..100 {
             let val = secure_random(5, 10);
-            assert!(val >= 5 && val <= 10);
+            assert!((5..=10).contains(&val));
         }
     }
 
@@ -197,5 +247,126 @@ mod tests {
             ..default_config()
         };
         assert!(generate(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_generate_no_symbols() {
+        let cfg = Config {
+            no_symbols: true,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert!(pw.chars().all(|c| !"!@#$*_".contains(c)));
+    }
+
+    #[test]
+    fn test_generate_no_upper() {
+        let cfg = Config {
+            no_upper: true,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert!(pw.chars().all(|c| !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn test_generate_no_lower() {
+        let cfg = Config {
+            no_lower: true,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert!(pw.chars().all(|c| !c.is_ascii_lowercase()));
+    }
+
+    #[test]
+    fn test_generate_no_digits() {
+        let cfg = Config {
+            no_digits: true,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert!(pw.chars().all(|c| !c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_generate_only_alphanumeric() {
+        let cfg = Config {
+            only_alphanumeric: true,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn test_generate_exclude_ambiguous() {
+        let cfg = Config {
+            exclude_ambiguous: true,
+            length: 100,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert!(pw.chars().all(|c| !"0O1lI|".contains(c)));
+    }
+
+    #[test]
+    fn test_generate_exclude_chars() {
+        let cfg = Config {
+            exclude_chars: "abc".to_string(),
+            length: 100,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert!(pw.chars().all(|c| !"abc".contains(c)));
+    }
+
+    #[test]
+    fn test_generate_custom_symbols() {
+        let cfg = Config {
+            symbols: "^&".to_string(),
+            length: 100,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        let sym_chars: Vec<char> = pw.chars().filter(|c| !c.is_ascii_alphanumeric()).collect();
+        assert!(sym_chars.iter().all(|c| "^&".contains(*c)));
+    }
+
+    #[test]
+    fn test_generate_empty_pool() {
+        let cfg = Config {
+            no_upper: true,
+            no_lower: true,
+            no_digits: true,
+            no_symbols: true,
+            ..default_config()
+        };
+        assert!(generate(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_generate_exclusion_empties_pool() {
+        let cfg = Config {
+            no_upper: true,
+            no_lower: true,
+            no_symbols: true,
+            exclude_chars: "0123456789".to_string(),
+            ..default_config()
+        };
+        let err = generate(&cfg).unwrap_err();
+        assert_eq!(
+            err,
+            "character pool is empty; verify your inclusion and exclusion options"
+        );
+    }
+
+    #[test]
+    fn test_filter_group() {
+        assert_eq!(filter_group("abc", false, ""), "abc");
+        assert_eq!(filter_group("abc", false, "b"), "ac");
+        assert_eq!(filter_group("0O1lI|a", true, ""), "a");
+        assert_eq!(filter_group("0O1lI|abc", true, "a"), "bc");
+        assert_eq!(filter_group("abc", false, "abc"), "");
     }
 }
