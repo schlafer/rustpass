@@ -92,7 +92,8 @@ mod tests {
     fn test_passphrase_default() {
         let cfg = PassphraseConfig::default();
         let (pp, wl_size) = generate_passphrase(&cfg).unwrap();
-        assert_eq!(pp.split('-').count(), 4);
+        let expected_parts = 4 + pp.matches("yo-yo").count();
+        assert_eq!(pp.split('-').count(), expected_parts);
         assert_eq!(wl_size, 1296);
     }
 
@@ -103,7 +104,8 @@ mod tests {
             ..Default::default()
         };
         let (pp, _) = generate_passphrase(&cfg).unwrap();
-        assert_eq!(pp.split('-').count(), 6);
+        let expected_parts = 6 + pp.matches("yo-yo").count();
+        assert_eq!(pp.split('-').count(), expected_parts);
     }
 
     #[test]
@@ -120,10 +122,11 @@ mod tests {
     fn test_passphrase_capitalize() {
         let cfg = PassphraseConfig {
             capitalize: true,
+            separator: ".".to_string(),
             ..Default::default()
         };
         let (pp, _) = generate_passphrase(&cfg).unwrap();
-        for word in pp.split('-') {
+        for word in pp.split('.') {
             assert!(word.chars().next().unwrap().is_uppercase());
         }
     }
@@ -132,10 +135,11 @@ mod tests {
     fn test_passphrase_include_number() {
         let cfg = PassphraseConfig {
             include_number: true,
+            separator: ".".to_string(),
             ..Default::default()
         };
         let (pp, _) = generate_passphrase(&cfg).unwrap();
-        let parts: Vec<&str> = pp.split('-').collect();
+        let parts: Vec<&str> = pp.split('.').collect();
         assert_eq!(parts.len(), 5); // 4 words + 1 number
         let num_part = parts.last().unwrap();
         assert!(num_part.parse::<u32>().is_ok());
