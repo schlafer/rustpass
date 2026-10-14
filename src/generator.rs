@@ -50,6 +50,17 @@ pub fn shuffle(chars: &mut Vec<char>) {
     }
 }
 
+fn rand_perm(n: usize, k: usize) -> Vec<usize> {
+    assert!(k <= n, "cannot select {} distinct elements from {}", k, n);
+    let mut pool: Vec<usize> = (0..n).collect();
+    for i in 0..k {
+        let j = secure_random(i, n - 1);
+        pool.swap(i, j);
+    }
+    pool.truncate(k);
+    pool
+}
+
 fn filter_group(charset: &str, exclude_ambiguous: bool, exclude_chars: &str) -> String {
     charset
         .chars()
@@ -112,18 +123,27 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
     let pool_size: usize = active_groups.iter().map(|g| g.chars().count()).sum();
 
     let num_groups = active_groups.len();
-    let base = cfg.length / num_groups;
-    let remainder = cfg.length % num_groups;
-
     let mut pass: Vec<char> = Vec::with_capacity(cfg.length);
 
-    for (g, group) in active_groups.iter().enumerate() {
-        let mut this_len = base;
-        if g < remainder {
-            this_len += 1;
+    if cfg.length >= num_groups {
+        let base = cfg.length / num_groups;
+        let remainder = cfg.length % num_groups;
+
+        for (g, group) in active_groups.iter().enumerate() {
+            let mut this_len = base;
+            if g < remainder {
+                this_len += 1;
+            }
+            let group_chars: Vec<char> = group.chars().collect();
+            for _ in 0..this_len {
+                let idx = secure_random(0, group_chars.len() - 1);
+                pass.push(group_chars[idx]);
+            }
         }
-        let group_chars: Vec<char> = group.chars().collect();
-        for _ in 0..this_len {
+    } else {
+        let selected_indices = rand_perm(num_groups, cfg.length);
+        for g in selected_indices {
+            let group_chars: Vec<char> = active_groups[g].chars().collect();
             let idx = secure_random(0, group_chars.len() - 1);
             pass.push(group_chars[idx]);
         }
@@ -368,5 +388,130 @@ mod tests {
         assert_eq!(filter_group("0O1lI|a", true, ""), "a");
         assert_eq!(filter_group("0O1lI|abc", true, "a"), "bc");
         assert_eq!(filter_group("abc", false, "abc"), "");
+    }
+
+    #[test]
+    fn test_generate_length_1() {
+        let cfg = Config {
+            length: 1,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert_eq!(pw.len(), 1);
+    }
+
+    #[test]
+    fn test_generate_length_2() {
+        let cfg = Config {
+            length: 2,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert_eq!(pw.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_length_3() {
+        let cfg = Config {
+            length: 3,
+            ..default_config()
+        };
+        let (pw, _) = generate(&cfg).unwrap();
+        assert_eq!(pw.len(), 3);
+        // Characters should come from 3 distinct groups
+        let mut distinct_groups = std::collections::HashSet::new();
+        for c in pw.chars() {
+            if UPPER.contains(c) {
+                distinct_groups.insert("upper");
+            } else if LOWER.contains(c) {
+                distinct_groups.insert("lower");
+            } else if DIGITS.contains(c) {
+                distinct_groups.insert("digit");
+            } else if SPECIAL.contains(c) {
+                distinct_groups.insert("special");
+            }
+        }
+        assert_eq!(
+            distinct_groups.len(),
+            3,
+            "Characters should come from 3 distinct groups"
+        );
+    }
+
+    #[test]
+    fn test_generate_small_length_distribution() {
+        let cfg = Config {
+            length: 1,
+            ..default_config()
+        };
+        let mut saw_upper = false;
+        let mut saw_lower = false;
+        let mut saw_digit = false;
+        let mut saw_symbol = false;
+
+        for _ in 0..200 {
+            let (pw, _) = generate(&cfg).unwrap();
+            let c = pw.chars().next().unwrap();
+            if UPPER.contains(c) {
+                saw_upper = true;
+            } else if LOWER.contains(c) {
+                saw_lower = true;
+            } else if DIGITS.contains(c) {
+                saw_digit = true;
+            } else if SPECIAL.contains(c) {
+                saw_symbol = true;
+            }
+        }
+
+        assert!(
+            saw_upper && saw_lower && saw_digit && saw_symbol,
+            "All groups should be represented across length-1 generations (upper={}, lower={}, digit={}, symbol={})",
+            saw_upper, saw_lower, saw_digit, saw_symbol
+        );
+    }
+
+    #[test]
+    fn test_rand_perm_distinct_and_bounds() {
+        for _ in 0..100 {
+            let perm = rand_perm(10, 5);
+            assert_eq!(perm.len(), 5);
+            let mut set = std::collections::HashSet::new();
+            for &idx in &perm {
+                assert!(idx < 10);
+                assert!(set.insert(idx), "indices should be distinct");
+            }
+        }
+    }
+
+    #[test]
+    fn test_rand_perm_edge_cases() {
+        assert_eq!(rand_perm(0, 0), Vec::<usize>::new());
+        assert_eq!(rand_perm(5, 0), Vec::<usize>::new());
+
+        let perm = rand_perm(4, 4);
+        assert_eq!(perm.len(), 4);
+        let mut sorted = perm;
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot select 5 distinct elements from 4")]
+    fn test_rand_perm_k_greater_than_n() {
+        rand_perm(4, 5);
+    }
+
+    #[test]
+    fn test_rand_perm_coverage() {
+        let mut counts = [0usize; 4];
+        for _ in 0..200 {
+            let perm = rand_perm(4, 2);
+            for idx in perm {
+                counts[idx] += 1;
+            }
+        }
+        for (i, count) in counts.iter().enumerate() {
+            assert!(*count > 0, "element {i} should be picked");
+        }
     }
 }
