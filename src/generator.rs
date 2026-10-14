@@ -50,6 +50,13 @@ pub fn shuffle(chars: &mut Vec<char>) {
     }
 }
 
+#[allow(clippy::ptr_arg)]
+pub fn zero_vec(v: &mut Vec<char>) {
+    for c in v.iter_mut() {
+        *c = '\0';
+    }
+}
+
 fn rand_perm(n: usize, k: usize) -> Vec<usize> {
     assert!(k <= n, "cannot select {} distinct elements from {}", k, n);
     let mut pool: Vec<usize> = (0..n).collect();
@@ -151,7 +158,9 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
 
     shuffle(&mut pass);
 
-    Ok((pass.into_iter().collect(), pool_size))
+    let result: String = pass.iter().collect();
+    zero_vec(&mut pass);
+    Ok((result, pool_size))
 }
 
 #[cfg(test)]
@@ -513,5 +522,16 @@ mod tests {
         for (i, count) in counts.iter().enumerate() {
             assert!(*count > 0, "element {i} should be picked");
         }
+    }
+
+    #[test]
+    fn test_zero_vec() {
+        let mut v = vec!['a', 'B', '3', '!'];
+        zero_vec(&mut v);
+        assert!(v.iter().all(|c| *c == '\0'));
+
+        let mut empty: Vec<char> = Vec::new();
+        zero_vec(&mut empty);
+        assert!(empty.is_empty());
     }
 }

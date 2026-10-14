@@ -185,9 +185,9 @@ mod tests {
         };
         for _ in 0..50 {
             let (pp, _) = generate_passphrase(&cfg).unwrap();
-            let parts: Vec<&str> = pp.split('-').collect();
-            assert_eq!(parts.len(), 2);
-            let num: u32 = parts[1].parse().unwrap();
+            let (words, num_str) = pp.rsplit_once('-').unwrap();
+            assert!(!words.is_empty());
+            let num: u32 = num_str.parse().unwrap();
             assert!(num <= 99);
         }
     }

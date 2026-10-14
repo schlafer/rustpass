@@ -11,8 +11,8 @@ pub use entropy::{
     strength_rating,
 };
 pub use generator::{
-    default_config, generate, secure_random, shuffle, Config, AMBIGUOUS_CHARS, DEFAULT_LENGTH,
-    DEFAULT_SYMBOLS,
+    default_config, generate, secure_random, shuffle, zero_vec, Config, AMBIGUOUS_CHARS,
+    DEFAULT_LENGTH, DEFAULT_SYMBOLS,
 };
 pub use passphrase::{
     generate_passphrase, PassphraseConfig, DEFAULT_PASSPHRASE_SEPARATOR,
