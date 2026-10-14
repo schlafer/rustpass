@@ -2,7 +2,9 @@ use std::process;
 
 use clap::Parser;
 
-use crate::entropy::{calculate_entropy, calculate_passphrase_entropy, strength_rating};
+use crate::entropy::{
+    calculate_entropy, calculate_passphrase_entropy, shannon_entropy, strength_rating,
+};
 use crate::generator::{generate, Config};
 use crate::passphrase::{generate_passphrase, PassphraseConfig};
 
@@ -111,22 +113,10 @@ pub fn run() {
 
         match generate_passphrase(&pass_cfg) {
             Ok((passphrase, pool_size)) => {
+                println!("{}", passphrase);
                 if args.entropy {
                     let entropy = calculate_passphrase_entropy(args.words, pool_size);
-                    let rating = strength_rating(entropy);
-                    if args.count == 1 {
-                        println!(
-                            "Password:  {}\nEntropy:   {:.1} bits ({})\nPool Size: {}",
-                            passphrase, entropy, rating, pool_size
-                        );
-                    } else {
-                        println!(
-                            "{:<24} [Entropy: {:.1} bits, Strength: {}]",
-                            passphrase, entropy, rating
-                        );
-                    }
-                } else {
-                    println!("{}", passphrase);
+                    print_entropy_diagnostics(&passphrase, entropy, pool_size);
                 }
             }
             Err(err) => {
@@ -158,22 +148,10 @@ pub fn run() {
 
         match generate(&cfg) {
             Ok((password, pool_size)) => {
+                println!("{}", password);
                 if args.entropy {
                     let entropy = calculate_entropy(&password, pool_size);
-                    let rating = strength_rating(entropy);
-                    if args.count == 1 {
-                        println!(
-                            "Password:  {}\nEntropy:   {:.1} bits ({})\nPool Size: {}",
-                            password, entropy, rating, pool_size
-                        );
-                    } else {
-                        println!(
-                            "{:<24} [Entropy: {:.1} bits, Strength: {}]",
-                            password, entropy, rating
-                        );
-                    }
-                } else {
-                    println!("{}", password);
+                    print_entropy_diagnostics(&password, entropy, pool_size);
                 }
             }
             Err(err) => {
@@ -182,6 +160,15 @@ pub fn run() {
             }
         }
     }
+}
+
+fn print_entropy_diagnostics(output: &str, entropy: f64, pool_size: usize) {
+    let rating = strength_rating(entropy);
+    let shannon = shannon_entropy(output);
+    eprintln!(
+        "Entropy:   {:.1} bits ({})\nShannon:   {:.2} bits/char\nPool Size: {}",
+        entropy, rating, shannon, pool_size
+    );
 }
 
 #[cfg(test)]
