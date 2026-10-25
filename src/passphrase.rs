@@ -77,7 +77,8 @@ pub fn generate_passphrase(cfg: &PassphraseConfig) -> Result<(String, usize), Er
         }
     };
 
-    let mut selected_words = Vec::with_capacity(cfg.word_count);
+    let total_elements = cfg.word_count + if cfg.include_number { 1 } else { 0 };
+    let mut selected_words = Vec::with_capacity(total_elements);
     for _ in 0..cfg.word_count {
         let idx = secure_random(0, wordlist_len - 1);
         let word_str = match custom_words_ref {
@@ -91,12 +92,12 @@ pub fn generate_passphrase(cfg: &PassphraseConfig) -> Result<(String, usize), Er
         }
     }
 
-    let mut result = selected_words.join(&cfg.separator);
-
     if cfg.include_number {
         let num = secure_random(0, 99);
-        result.push_str(&format!("{}{}", cfg.separator, num));
+        selected_words.push(num.to_string());
     }
+
+    let result = selected_words.join(&cfg.separator);
 
     for mut w in selected_words {
         w.zeroize();

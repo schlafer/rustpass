@@ -22,7 +22,7 @@ A fast, cryptographically secure CLI password and memorable passphrase generator
 - **Batch Generation**: Generate multiple passwords at once (`-n 5` / `--count 5`).
 - **Script-Friendly & Quiet Mode**: Suppress trailing newlines (`-0`) and status messages (`-q` / `--quiet`) for clean piping into commands, variables, or files.
 - **Shell Completions & Man Pages**: Generate autocompletions (`--completions <shell>`) and troff manual pages (`--man`) out of the box.
-- **Memory Hygiene**: Actively wipes sensitive internal character buffers using volatile operations and zeroizes clipboard buffers via `zeroize`.
+- **Memory Hygiene**: Best-effort zeroization of internal character buffers and temporary secrets using the `zeroize` crate.
 - **Reusable Rust Crate**: Fully typed library API with structured error handling (`Error` enum) for integration into any Rust project.
 
 ---
@@ -149,7 +149,7 @@ rustpass -c
 # ✓ Copied to clipboard
 ```
 
-Copy directly without printing the secret to stdout (prevents terminal leakage and shoulder surfing):
+Copy directly to clipboard without printing to stdout (avoids echoing secrets in command history and stdout logs; note that when falling back to OSC 52, escape sequences still pass through the terminal):
 
 ```bash
 rustpass --copy-only
@@ -444,8 +444,9 @@ cargo build --release
 
 ## Security Considerations & Limitations
 
-- **Entropy Estimates:** The reported entropy (`-E`) is a theoretical upper-bound estimate calculated under the assumption of independent, uniform character selection from the effective pool ($L \times \log_2(pool)$). When character groups are partitioned (e.g. guaranteeing representation across groups), true keyspace size is slightly constrained. Shannon entropy reflects empirical character frequency diversity within the generated sample, not attacker guessability.
-- **Memory Hygiene:** RustPass uses volatile memory clearing and the `zeroize` crate to erase temporary character and clipboard buffers. However, memory cannot be guaranteed erased in all operating environments: heap reallocations, standard library `String` moves, terminal scrollback buffers, clipboard managers, or OS swap files may retain copies outside the application's boundary.
+- **Partitioned Entropy Model:** The reported entropy (`-E`) models the exact theoretical keyspace of the partitioned character generator when $L \ge k$, and provides the conservative min-entropy bound when $L < k$. Shannon entropy measures the empirical diversity and frequency distribution of characters within the generated string itself, not attacker guessability.
+- **Clipboard & Secret Handling:** `--copy-only` avoids printing secrets to stdout. However, external clipboard tools (`wl-copy`, `xclip`, `xsel`, `pbcopy`, `clip.exe`), clipboard history managers, and terminal emulators (when falling back to OSC 52) may retain copies of secrets. RustPass does not automatically clear the system clipboard after copying.
+- **Memory Hygiene Caveats:** RustPass uses `Zeroizing` and the `zeroize` crate to clear internal character buffers, intermediate joined strings, and JSON serialization buffers on drop. However, memory cannot be guaranteed completely erased across all environments: heap reallocations, serializer buffers, OS swap files, and standard library moves may retain transient copies outside the application's control.
 - **Randomness:** Randomness is strictly sourced from the operating system's cryptographic random number generator via the `rand` crate CSPRNG.
 
 ---

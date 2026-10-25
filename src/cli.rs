@@ -2,7 +2,7 @@ use std::process;
 
 use clap::{CommandFactory, Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::clipboard::copy_to_clipboard;
 use crate::entropy::{
@@ -196,6 +196,15 @@ pub fn execute_args(
     args: &Args,
     stdout: &mut dyn std::io::Write,
     stderr: &mut dyn std::io::Write,
+) -> Result<(), i32> {
+    execute_args_with(args, stdout, stderr, copy_to_clipboard)
+}
+
+pub(crate) fn execute_args_with(
+    args: &Args,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+    mut copy_fn: impl FnMut(&str) -> Result<(), crate::error::Error>,
 ) -> Result<(), i32> {
     if let Some(shell) = args.completions {
         let mut cmd = Args::command();
@@ -461,7 +470,7 @@ pub fn execute_args(
     let floored_ent = floor_entropy(overall_entropy);
     let rating = strength_rating(floored_ent);
 
-    let mut results: Vec<String> = Vec::with_capacity(args.count);
+    let mut results: Vec<Zeroizing<String>> = Vec::with_capacity(args.count);
     let mut json_entries: Vec<JsonPasswordEntry> = Vec::with_capacity(args.count);
 
     for _ in 0..args.count {
@@ -530,56 +539,73 @@ pub fn execute_args(
             }
         }
 
-        results.push(output);
+        results.push(Zeroizing::new(output));
     }
 
     if args.copy || args.copy_only {
-        let mut clipboard_text = results.join("\n");
-        let copy_res = handle_copy(&clipboard_text, stderr, args.quiet);
-        clipboard_text.zeroize();
-        if args.copy_only && copy_res.is_err() {
-            for mut s in results {
-                s.zeroize();
+        let copy_res = if results.len() == 1 {
+            handle_copy(&results[0], stderr, args.quiet, &mut copy_fn)
+        } else {
+            let total_len: usize =
+                results.iter().map(|s| s.len()).sum::<usize>() + (results.len() - 1);
+            let mut joined = Zeroizing::new(String::with_capacity(total_len));
+            for (i, r) in results.iter().enumerate() {
+                if i > 0 {
+                    joined.push('\n');
+                }
+                joined.push_str(r);
             }
+            handle_copy(&joined, stderr, args.quiet, &mut copy_fn)
+        };
+
+        if args.copy_only && copy_res.is_err() {
             return Err(1);
         }
     }
 
     if !args.copy_only {
         if args.format == OutputFormat::Json {
-            let response = JsonResponse {
+            let mut response = JsonResponse {
                 count: json_entries.len(),
                 passwords: json_entries,
             };
-            let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
+            let mut json_str = serde_json::to_string_pretty(&response).map_err(|e| {
                 writeln!(stderr, "Error: serializing JSON: {}", e).ok();
+                for entry in &mut response.passwords {
+                    entry.value.zeroize();
+                }
                 1
             })?;
+            for entry in &mut response.passwords {
+                entry.value.zeroize();
+            }
             if args.no_newline {
                 write!(stdout, "{}", json_str).ok();
             } else {
                 writeln!(stdout, "{}", json_str).ok();
             }
+            json_str.zeroize();
         } else if !args.entropy {
             if args.no_newline && args.count == 1 {
-                write!(stdout, "{}", results[0]).ok();
+                write!(stdout, "{}", results[0].as_str()).ok();
             } else {
                 for res in &results {
-                    writeln!(stdout, "{}", res).ok();
+                    writeln!(stdout, "{}", res.as_str()).ok();
                 }
             }
         }
     }
 
-    for mut s in results {
-        s.zeroize();
-    }
-
     Ok(())
 }
 
-fn handle_copy(text: &str, stderr: &mut dyn std::io::Write, quiet: bool) -> Result<(), ()> {
-    match copy_to_clipboard(text) {
+fn handle_copy(
+    text: &str,
+    stderr: &mut dyn std::io::Write,
+    quiet: bool,
+    copy_fn: &mut dyn FnMut(&str) -> Result<(), crate::error::Error>,
+) -> Result<(), ()> {
+    match copy_fn(text) {
         Ok(()) => {
             if !quiet {
                 writeln!(stderr, "✓ Copied to clipboard").ok();
@@ -807,15 +833,25 @@ mod tests {
     #[test]
     fn test_handle_copy_writes_to_stderr() {
         let mut stderr = Vec::new();
-        let _ = handle_copy("test-password", &mut stderr, false);
+        let _ = handle_copy("test-password", &mut stderr, false, &mut |_| Ok(()));
         let out = String::from_utf8(stderr).unwrap();
-        assert!(out.contains("✓ Copied to clipboard") || out.contains("Warning:"));
+        assert!(out.contains("✓ Copied to clipboard"));
+    }
+
+    #[test]
+    fn test_handle_copy_warning_to_stderr() {
+        let mut stderr = Vec::new();
+        let _ = handle_copy("test-password", &mut stderr, false, &mut |_| {
+            Err(crate::error::Error::Clipboard("failed".to_string()))
+        });
+        let out = String::from_utf8(stderr).unwrap();
+        assert!(out.contains("Warning: Clipboard error: failed"));
     }
 
     #[test]
     fn test_handle_copy_quiet_suppresses_stderr() {
         let mut stderr = Vec::new();
-        let _ = handle_copy("test-password", &mut stderr, true);
+        let _ = handle_copy("test-password", &mut stderr, true, &mut |_| Ok(()));
         assert!(stderr.is_empty());
     }
 
@@ -824,10 +860,10 @@ mod tests {
         let args = Args::try_parse_from(["rustpass", "--copy"]).unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let res = execute_args(&args, &mut stdout, &mut stderr);
+        let res = execute_args_with(&args, &mut stdout, &mut stderr, |_| Ok(()));
         assert_eq!(res, Ok(()));
         let err_out = String::from_utf8(stderr).unwrap();
-        assert!(err_out.contains("✓ Copied to clipboard") || err_out.contains("Warning:"));
+        assert!(err_out.contains("✓ Copied to clipboard"));
     }
 
     #[test]
@@ -835,7 +871,7 @@ mod tests {
         let args = Args::try_parse_from(["rustpass", "--copy", "-q"]).unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let res = execute_args(&args, &mut stdout, &mut stderr);
+        let res = execute_args_with(&args, &mut stdout, &mut stderr, |_| Ok(()));
         assert_eq!(res, Ok(()));
         assert!(stderr.is_empty());
     }
@@ -1060,10 +1096,74 @@ mod tests {
         let args = Args::try_parse_from(["rustpass", "--copy-only"]).unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let res = execute_args(&args, &mut stdout, &mut stderr);
+        let res = execute_args_with(&args, &mut stdout, &mut stderr, |_| Ok(()));
         assert_eq!(res, Ok(()));
         // Stdout MUST be empty
         assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn test_execute_mock_backend_single_copy() {
+        let args = Args::try_parse_from(["rustpass", "-c"]).unwrap();
+        let mut copied = String::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = execute_args_with(&args, &mut stdout, &mut stderr, |text| {
+            copied = text.to_string();
+            Ok(())
+        });
+        assert_eq!(res, Ok(()));
+        let stdout_str = String::from_utf8(stdout).unwrap().trim().to_string();
+        assert_eq!(copied, stdout_str);
+    }
+
+    #[test]
+    fn test_execute_mock_backend_batch_copy() {
+        let args = Args::try_parse_from(["rustpass", "-n", "3", "-c"]).unwrap();
+        let mut copied = String::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = execute_args_with(&args, &mut stdout, &mut stderr, |text| {
+            copied = text.to_string();
+            Ok(())
+        });
+        assert_eq!(res, Ok(()));
+        let stdout_str = String::from_utf8(stdout).unwrap().trim().to_string();
+        assert_eq!(copied, stdout_str);
+        let lines: Vec<&str> = copied.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_execute_mock_backend_copy_only_silent_stdout() {
+        let args = Args::try_parse_from(["rustpass", "--copy-only"]).unwrap();
+        let mut copied = String::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = execute_args_with(&args, &mut stdout, &mut stderr, |text| {
+            copied = text.to_string();
+            Ok(())
+        });
+        assert_eq!(res, Ok(()));
+        assert!(stdout.is_empty());
+        assert!(!copied.is_empty());
+    }
+
+    #[test]
+    fn test_execute_mock_backend_copy_only_failure_exits_one() {
+        let args = Args::try_parse_from(["rustpass", "--copy-only"]).unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = execute_args_with(&args, &mut stdout, &mut stderr, |_| {
+            Err(crate::error::Error::Clipboard(
+                "mock copy error".to_string(),
+            ))
+        });
+        assert_eq!(res, Err(1));
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("mock copy error"));
     }
 
     #[test]

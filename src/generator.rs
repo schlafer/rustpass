@@ -1,4 +1,5 @@
 use rand::Rng;
+use zeroize::Zeroize;
 
 use crate::error::Error;
 
@@ -74,16 +75,10 @@ pub fn shuffle(chars: &mut Vec<char>) {
     }
 }
 
-/// Zeroizes the contents of a character buffer using volatile writes and memory fences
-/// to prevent dead-store elimination by compiler optimizations, then clears the vector.
+/// Zeroizes the contents of a character buffer using the [`zeroize`] crate, then clears the vector.
 #[allow(clippy::ptr_arg)]
 pub fn zero_vec(v: &mut Vec<char>) {
-    for c in v.iter_mut() {
-        unsafe {
-            std::ptr::write_volatile(c as *mut char, '\0');
-        }
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    v.as_mut_slice().zeroize();
     v.clear();
 }
 
@@ -229,7 +224,11 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), Error> {
 
     shuffle(&mut pass);
 
-    let result: String = pass.iter().collect();
+    let total_len: usize = pass.iter().map(|c| c.len_utf8()).sum();
+    let mut result = String::with_capacity(total_len);
+    for &c in &pass {
+        result.push(c);
+    }
     zero_vec(&mut pass);
     Ok((result, pool_size))
 }
