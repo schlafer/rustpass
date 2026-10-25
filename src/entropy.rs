@@ -2,7 +2,22 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// Calculates the key-space entropy in bits based on length and pool size.
+/// Calculates the theoretical keyspace entropy in bits based on length and pool size.
+///
+/// # Assumptions & Model
+/// This formula computes `L * log2(pool_size)`, which is an **upper-bound estimate**
+/// assuming that each character is independently and uniformly selected from the entire
+/// effective pool.
+///
+/// **Note on Partitioned Generation:** When character groups are partitioned (such as
+/// in `generator::generate` which guarantees representation of each enabled group by
+/// dividing length across groups), the true keyspace size is strictly smaller than
+/// `pool_size^L`. For instance, a 12-character password with 4 default groups (pool 68)
+/// has a true keyspace entropy of ~64.4 bits rather than the simple i.i.d. estimate of ~73.0 bits.
+///
+/// This estimate is a useful upper bound for comparing configurations, but should not
+/// be taken as an absolute guarantee of password unguessability under targeted attacks.
+///
 /// If password is empty or pool_size <= 1, returns 0.0.
 /// If pool_size is 0, dynamically estimates the pool size from the password.
 pub fn calculate_entropy(password: &str, pool_size: usize) -> f64 {
@@ -23,14 +38,37 @@ pub fn calculate_entropy(password: &str, pool_size: usize) -> f64 {
     password.chars().count() as f64 * (pool_size as f64).log2()
 }
 
-/// Calculates entropy for a passphrase based on word count and wordlist size.
+/// Calculates word-selection entropy for a passphrase based on word count and wordlist size.
+///
+/// Assumes each word is chosen uniformly and independently from a wordlist of `wordlist_size`
+/// distinct words. Deterministic separators and capitalization do not add entropy.
+///
 /// If word_count is 0 or wordlist_size <= 1, returns 0.0.
 pub fn calculate_passphrase_entropy(word_count: usize, wordlist_size: usize) -> f64 {
+    calculate_passphrase_entropy_with_number(word_count, wordlist_size, false)
+}
+
+/// Calculates entropy for a passphrase, optionally accounting for a uniformly generated
+/// numeric suffix (0..=99) which contributes up to `log2(100)` (~6.64) bits of entropy.
+///
+/// # Assumptions
+/// - Words are selected uniformly and independently with replacement from `wordlist_size` unique words.
+/// - If `include_number` is true, an integer in `0..=99` is uniformly and independently chosen.
+/// - Deterministic capitalization and static word separators do not add entropy and are not counted.
+pub fn calculate_passphrase_entropy_with_number(
+    word_count: usize,
+    wordlist_size: usize,
+    include_number: bool,
+) -> f64 {
     if word_count == 0 || wordlist_size <= 1 {
         return 0.0;
     }
 
-    word_count as f64 * (wordlist_size as f64).log2()
+    let mut bits = word_count as f64 * (wordlist_size as f64).log2();
+    if include_number {
+        bits += (100.0_f64).log2();
+    }
+    bits
 }
 
 /// Returns a human-readable strength description based on bits of entropy:
@@ -53,7 +91,18 @@ pub fn strength_rating(entropy: f64) -> &'static str {
     }
 }
 
-/// Calculates the Shannon information entropy (uncertainty) of a string.
+/// Calculates the Shannon information entropy (uncertainty) of a string based on character frequencies.
+///
+/// # Distinction from Keyspace Guessability
+/// Shannon entropy measures the empirical diversity and frequency distribution of characters
+/// within the *generated string itself* (in bits per character).
+///
+/// It is **not** a direct measure of password strength or attacker guessability:
+/// a password chosen from a high-entropy random process might coincidentally have repeated
+/// characters, resulting in a lower Shannon entropy, yet remain cryptographically strong
+/// against brute-force search. Conversely, a deterministic pattern like "abcdefghij" has
+/// high Shannon entropy despite zero cryptographic security.
+///
 /// Returns 0.0 for an empty string.
 pub fn shannon_entropy(s: &str) -> f64 {
     let total = s.chars().count();
@@ -156,9 +205,21 @@ mod tests {
 
     #[test]
     fn test_passphrase_entropy() {
-        // 4 words from 1296: 4 * log2(1296) ≈ 41.4
+        // 4 words from 1296: 4 * log2(1296) ≈ 41.36
         let e = calculate_passphrase_entropy(4, 1296);
-        assert!((e - 41.4).abs() < 0.5);
+        assert!((e - 41.36).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_passphrase_entropy_with_numeric_suffix() {
+        // Without number: 4 * log2(1296) ≈ 41.36
+        let e_no_num = calculate_passphrase_entropy_with_number(4, 1296, false);
+        assert!((e_no_num - 41.36).abs() < 0.1);
+
+        // With number: 4 * log2(1296) + log2(100) ≈ 41.36 + 6.64 = 48.00
+        let e_with_num = calculate_passphrase_entropy_with_number(4, 1296, true);
+        assert!((e_with_num - 48.00).abs() < 0.1);
+        assert!((e_with_num - e_no_num - (100.0_f64).log2()).abs() < 1e-10);
     }
 
     #[test]
@@ -166,6 +227,8 @@ mod tests {
         assert_eq!(calculate_passphrase_entropy(0, 1296), 0.0);
         assert_eq!(calculate_passphrase_entropy(4, 1), 0.0);
         assert_eq!(calculate_passphrase_entropy(4, 0), 0.0);
+        assert_eq!(calculate_passphrase_entropy_with_number(0, 1296, true), 0.0);
+        assert_eq!(calculate_passphrase_entropy_with_number(4, 1, true), 0.0);
     }
 
     #[test]

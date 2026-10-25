@@ -7,12 +7,13 @@ on:
     branches: [ main ]
 
 jobs:
-  ci:
-    name: Build & Test (Rust ${{ matrix.rust }})
+  test:
+    name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ ubuntu-latest ]
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
         rust: [ stable ]
     steps:
       - name: Checkout Code
@@ -25,13 +26,25 @@ jobs:
           components: rustfmt, clippy
 
       - name: Check Formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
 
       - name: Lint with Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run Tests
-        run: cargo test --verbose
+        run: cargo test --all-targets --verbose
 
       - name: Build Release Binary
         run: cargo build --release --verbose
+
+  deny:
+    name: Security & License Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2

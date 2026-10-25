@@ -15,10 +15,10 @@ A fast, cryptographically secure CLI password and memorable passphrase generator
 - **Granular Character Controls**: Disable symbols, numbers, uppercase, or lowercase; or restrict to alphanumeric only.
 - **Exclude Ambiguous Characters**: Filter out confusing lookalikes like `0`, `O`, `1`, `l`, `I`, and `|`.
 - **Clipboard Integration**: Seamlessly copy passwords via `-c` / `--copy` across Linux, macOS, and Windows with OSC 52 terminal fallback.
-- **Strength & Entropy Analysis**: Real-time keyspace and Shannon entropy calculation with human-readable ratings (`-E` / `--entropy`).
+- **Strength & Entropy Analysis**: Real-time theoretical keyspace and Shannon entropy calculation with human-readable ratings (`-E` / `--entropy`).
 - **Batch Generation**: Generate multiple passwords at once (`-n 5` / `--count 5`).
 - **Script-Friendly**: Suppress trailing newlines (`-0` / `--no-newline`) for clean piping into commands, variables, or files.
-- **Memory Zeroization**: Zeroes out sensitive password and clipboard buffers in memory immediately after use (`zeroize`).
+- **Memory Hygiene**: Actively wipes sensitive internal character buffers using volatile operations and zeroizes clipboard buffers via `zeroize`.
 - **Reusable Rust Crate**: Can be imported as a library into any Rust application.
 
 ---
@@ -160,6 +160,108 @@ rustpass -n 3 -E
 # xT1*bN7!qZ3_             [Entropy: 73.0 bits, Strength: Very Strong]
 ```
 
+### 5. Policy Presets
+
+Apply battle-tested security policies with a single flag:
+
+```bash
+# Strict: 20 chars, all groups, excludes lookalikes (0, O, 1, l, I, |)
+rustpass --preset strict
+
+# Alphanumeric: 16 chars, letters and digits only
+rustpass --preset alphanumeric
+
+# Memorable: 5 words, capitalized, random numeric suffix
+rustpass --preset memorable
+```
+
+Presets establish sensible defaults and can be freely customized with explicit flags (e.g. `rustpass --preset strict -l 32`).
+
+### 6. Minimum Entropy Requirements
+
+Specify a target theoretical keyspace entropy and let RustPass dynamically compute the required length:
+
+```bash
+# Automatically sets length to reach at least 100 bits of entropy
+rustpass --min-entropy 100
+
+# Works seamlessly with passphrases
+rustpass -p --min-entropy 80
+```
+
+### 7. Structured JSON Output
+
+Generate passwords in structured JSON format for scripts and integrations:
+
+```bash
+rustpass -n 2 -l 16 -f json
+```
+
+Output:
+```json
+{
+  "count": 2,
+  "passwords": [
+    {
+      "value": "vR9$pL2#vR5@kL7*",
+      "length": 16
+    },
+    {
+      "value": "xT1*bN7!qZ3_bA4%",
+      "length": 16
+    }
+  ]
+}
+```
+
+Include entropy analysis metadata with `-E`:
+
+```bash
+rustpass -l 16 -f json -E
+```
+
+Output:
+```json
+{
+  "count": 1,
+  "passwords": [
+    {
+      "value": "Aq#8Tz3LpR_4kL7*",
+      "length": 16,
+      "entropy_bits": 97.4,
+      "shannon_entropy": 3.75,
+      "pool_size": 68,
+      "strength_rating": "Strong"
+    }
+  ]
+}
+```
+
+### 8. Shell Completions & Man Page
+
+Generate autocompletions for your shell:
+
+```bash
+# Bash
+source <(rustpass --completions bash)
+
+# Zsh
+rustpass --completions zsh > ~/.zfunc/_rustpass
+
+# Fish
+rustpass --completions fish > ~/.config/fish/completions/rustpass.fish
+```
+
+View or install the man page:
+
+```bash
+# View directly
+rustpass --man | man -l -
+
+# Or install to system man pages
+rustpass --man | sudo tee /usr/local/share/man/man1/rustpass.1 > /dev/null
+```
+
 ---
 
 ## Shell & Scripting Integration
@@ -190,6 +292,10 @@ rustpass -n 20 > passwords.txt
 | --- | --- | --- | --- |
 | `--length <int>` | `-l` | Length of generated password | `12` |
 | `--count <int>` | `-n` | Number of passwords to generate | `1` |
+| `--preset <preset>` | | Policy preset (`strict`, `alphanumeric`, `memorable`) | |
+| `--min-entropy <float>` | | Minimum required keyspace entropy in bits | |
+| `--format <format>` | `-f` | Output format (`text` or `json`) | `text` |
+| `--quiet` | `-q` | Suppress status and diagnostic messages on stderr | `false` |
 | `--no-symbols` | `-S` | Exclude special characters (`!@#$*_`) | `false` |
 | `--no-digits` | `-D` | Exclude numeric digits (`0-9`) | `false` |
 | `--no-upper` | `-U` | Exclude uppercase letters (`A-Z`) | `false` |
@@ -204,8 +310,11 @@ rustpass -n 20 > passwords.txt
 | `--capitalize` | | Capitalize words in passphrase | `false` |
 | `--include-number` | | Append random number to passphrase | `false` |
 | `--copy` | `-c` | Copy result to system clipboard | `false` |
+| `--copy-only` | | Copy to clipboard only, suppressing stdout output | `false` |
 | `--entropy` | `-E` | Display entropy and strength | `false` |
 | `--no-newline` | `-0` | Suppress trailing newline | `false` |
+| `--completions <shell>` | | Generate completions (`bash`, `elvish`, `fish`, `powershell`, `zsh`) | |
+| `--man` | | Output manual page in roff format | |
 | `--version` | `-v` | Display version information | |
 | `--help` | `-h` | Display help screen | |
 
@@ -217,21 +326,27 @@ You can use `rustpass` directly in your Rust projects by adding it to `Cargo.tom
 
 ```rust
 use rustpass::{
-    calculate_entropy, generate, generate_passphrase, strength_rating, Config, PassphraseConfig,
+    calculate_entropy, generate, generate_passphrase, strength_rating, Config, Error,
+    PassphraseConfig,
 };
 
-fn main() {
+fn main() -> Result<(), Error> {
     // Standard password
     let cfg = Config {
         length: 20,
         exclude_ambiguous: true,
         ..Config::default()
     };
-    let (password, pool_size) = generate(&cfg).expect("generation failed");
-    let entropy = calculate_entropy(&password, pool_size);
-    let rating = strength_rating(entropy);
-    println!("Generated: {}", password);
-    println!("Entropy: {:.1} bits ({})", entropy, rating);
+    match generate(&cfg) {
+        Ok((password, pool_size)) => {
+            let entropy = calculate_entropy(&password, pool_size);
+            let rating = strength_rating(entropy);
+            println!("Generated: {}", password);
+            println!("Entropy: {:.1} bits ({})", entropy, rating);
+        }
+        Err(Error::EmptyPool(msg)) => eprintln!("Pool configuration empty: {}", msg),
+        Err(err) => eprintln!("Generation error: {}", err),
+    }
 
     // Memorable passphrase
     let pass_cfg = PassphraseConfig {
@@ -240,8 +355,10 @@ fn main() {
         capitalize: true,
         ..PassphraseConfig::default()
     };
-    let (passphrase, _) = generate_passphrase(&pass_cfg).expect("passphrase generation failed");
+    let (passphrase, _) = generate_passphrase(&pass_cfg)?;
     println!("Passphrase: {}", passphrase);
+
+    Ok(())
 }
 ```
 
@@ -267,6 +384,14 @@ Build release binary:
 ```bash
 cargo build --release
 ```
+
+---
+
+## Security Considerations & Limitations
+
+- **Entropy Estimates:** The reported entropy (`-E`) is a theoretical upper-bound estimate calculated under the assumption of independent, uniform character selection from the effective pool ($L \times \log_2(pool)$). When character groups are partitioned (e.g. guaranteeing representation across groups), true keyspace size is slightly constrained. Shannon entropy reflects empirical character frequency diversity within the generated sample, not attacker guessability.
+- **Memory Hygiene:** RustPass uses volatile memory clearing and the `zeroize` crate to erase temporary character and clipboard buffers. However, memory cannot be guaranteed erased in all operating environments: heap reallocations, standard library `String` moves, terminal scrollback buffers, clipboard managers, or OS swap files may retain copies outside the application's boundary.
+- **Randomness:** Randomness is strictly sourced from the operating system's cryptographic random number generator via the `rand` crate CSPRNG.
 
 ---
 

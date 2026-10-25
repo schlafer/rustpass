@@ -1,5 +1,7 @@
 use rand::Rng;
 
+use crate::error::Error;
+
 pub const DEFAULT_LENGTH: usize = 12;
 pub const DEFAULT_SYMBOLS: &str = "!@#$*_";
 pub const AMBIGUOUS_CHARS: &str = "0O1lI|";
@@ -37,7 +39,13 @@ pub fn default_config() -> Config {
     }
 }
 
+/// Generates a cryptographically secure random integer in the inclusive range `[min, max]`.
+///
+/// If `min >= max`, returns `min` without panicking.
 pub fn secure_random(min: usize, max: usize) -> usize {
+    if min >= max {
+        return min;
+    }
     rand::rng().random_range(min..=max)
 }
 
@@ -50,11 +58,17 @@ pub fn shuffle(chars: &mut Vec<char>) {
     }
 }
 
+/// Zeroizes the contents of a character buffer using volatile writes and memory fences
+/// to prevent dead-store elimination by compiler optimizations, then clears the vector.
 #[allow(clippy::ptr_arg)]
 pub fn zero_vec(v: &mut Vec<char>) {
     for c in v.iter_mut() {
-        *c = '\0';
+        unsafe {
+            std::ptr::write_volatile(c as *mut char, '\0');
+        }
     }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    v.clear();
 }
 
 fn rand_perm(n: usize, k: usize) -> Vec<usize> {
@@ -68,18 +82,32 @@ fn rand_perm(n: usize, k: usize) -> Vec<usize> {
     pool
 }
 
+/// Filters a character group by excluding ambiguous characters and specific excluded characters.
+/// Guarantees that the returned string contains only unique characters (deduplicated).
 fn filter_group(charset: &str, exclude_ambiguous: bool, exclude_chars: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
     charset
         .chars()
         .filter(|&c| {
-            (!exclude_ambiguous || !AMBIGUOUS_CHARS.contains(c)) && !exclude_chars.contains(c)
+            seen.insert(c)
+                && (!exclude_ambiguous || !AMBIGUOUS_CHARS.contains(c))
+                && !exclude_chars.contains(c)
         })
         .collect()
 }
 
-pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
-    if cfg.length == 0 {
-        return Err("password length must be greater than 0".to_string());
+/// Builds the active, deduplicated, disjoint character groups for a given configuration.
+pub fn build_active_groups(cfg: &Config) -> Result<Vec<String>, Error> {
+    if cfg.only_alphanumeric && !cfg.symbols.is_empty() && cfg.symbols != DEFAULT_SYMBOLS {
+        return Err(Error::ConflictingOptions(
+            "cannot specify custom symbols when only-alphanumeric is enabled".to_string(),
+        ));
+    }
+
+    if cfg.no_symbols && !cfg.symbols.is_empty() && cfg.symbols != DEFAULT_SYMBOLS {
+        return Err(Error::ConflictingOptions(
+            "cannot specify custom symbols when no-symbols is enabled".to_string(),
+        ));
     }
 
     let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -92,9 +120,13 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
     };
 
     let mut active_groups: Vec<String> = Vec::new();
+    let mut all_seen = std::collections::HashSet::new();
 
     if !cfg.no_upper {
         let filtered = filter_group(upper, cfg.exclude_ambiguous, &cfg.exclude_chars);
+        for c in filtered.chars() {
+            all_seen.insert(c);
+        }
         if !filtered.is_empty() {
             active_groups.push(filtered);
         }
@@ -102,6 +134,9 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
 
     if !cfg.no_lower {
         let filtered = filter_group(lower, cfg.exclude_ambiguous, &cfg.exclude_chars);
+        for c in filtered.chars() {
+            all_seen.insert(c);
+        }
         if !filtered.is_empty() {
             active_groups.push(filtered);
         }
@@ -109,6 +144,9 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
 
     if !cfg.no_digits {
         let filtered = filter_group(digits, cfg.exclude_ambiguous, &cfg.exclude_chars);
+        for c in filtered.chars() {
+            all_seen.insert(c);
+        }
         if !filtered.is_empty() {
             active_groups.push(filtered);
         }
@@ -116,17 +154,36 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
 
     if !cfg.no_symbols && !cfg.only_alphanumeric {
         let filtered = filter_group(symbols, cfg.exclude_ambiguous, &cfg.exclude_chars);
-        if !filtered.is_empty() {
-            active_groups.push(filtered);
+        // Exclude any characters already present in previously active groups to maintain disjoint groups
+        let unique_symbols: String = filtered.chars().filter(|c| all_seen.insert(*c)).collect();
+        if !unique_symbols.is_empty() {
+            active_groups.push(unique_symbols);
         }
     }
 
     if active_groups.is_empty() {
-        return Err(
+        return Err(Error::EmptyPool(
             "character pool is empty; verify your inclusion and exclusion options".to_string(),
-        );
+        ));
     }
 
+    Ok(active_groups)
+}
+
+/// Returns the effective pool size (total distinct available characters) for a given configuration.
+pub fn effective_pool_size(cfg: &Config) -> Result<usize, Error> {
+    let groups = build_active_groups(cfg)?;
+    Ok(groups.iter().map(|g| g.chars().count()).sum())
+}
+
+pub fn generate(cfg: &Config) -> Result<(String, usize), Error> {
+    if cfg.length == 0 {
+        return Err(Error::InvalidLength(
+            "password length must be greater than 0".to_string(),
+        ));
+    }
+
+    let active_groups = build_active_groups(cfg)?;
     let pool_size: usize = active_groups.iter().map(|g| g.chars().count()).sum();
 
     let num_groups = active_groups.len();
@@ -148,6 +205,8 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), String> {
             }
         }
     } else {
+        // When length < num_groups, select `length` distinct groups at random without replacement
+        // and pick one character from each, guaranteeing diverse group representation.
         let selected_indices = rand_perm(num_groups, cfg.length);
         for g in selected_indices {
             let group_chars: Vec<char> = active_groups[g].chars().collect();
@@ -386,7 +445,9 @@ mod tests {
         let err = generate(&cfg).unwrap_err();
         assert_eq!(
             err,
-            "character pool is empty; verify your inclusion and exclusion options"
+            Error::EmptyPool(
+                "character pool is empty; verify your inclusion and exclusion options".to_string()
+            )
         );
     }
 
@@ -525,10 +586,113 @@ mod tests {
     }
 
     #[test]
+    fn test_secure_random_boundary_safe() {
+        assert_eq!(secure_random(5, 5), 5);
+        assert_eq!(secure_random(10, 5), 10);
+    }
+
+    #[test]
+    fn test_filter_group_deduplication() {
+        assert_eq!(filter_group("aabbcc!!", false, ""), "abc!");
+        assert_eq!(filter_group("!@@##$$", false, ""), "!@#$");
+    }
+
+    #[test]
+    fn test_generate_custom_symbols_deduplicated() {
+        let cfg = Config {
+            symbols: "!!@@##".to_string(),
+            length: 12,
+            ..default_config()
+        };
+        let (pw, pool_size) = generate(&cfg).unwrap();
+        assert_eq!(pw.len(), 12);
+        // Upper(26) + Lower(26) + Digits(10) + Symbols(3 unique: !, @, #) = 65
+        assert_eq!(pool_size, 65);
+    }
+
+    #[test]
+    fn test_generate_custom_symbols_overlapping_classes() {
+        let cfg = Config {
+            symbols: "aA1!".to_string(),
+            length: 12,
+            ..default_config()
+        };
+        let (pw, pool_size) = generate(&cfg).unwrap();
+        assert_eq!(pw.len(), 12);
+        // 'a', 'A', '1' are already in lower, upper, digits groups. Only '!' remains in symbols.
+        // Upper(26) + Lower(26) + Digits(10) + Symbols(1: !) = 63
+        assert_eq!(pool_size, 63);
+    }
+
+    #[test]
+    fn test_generate_conflicting_symbols_with_only_alphanumeric() {
+        let cfg = Config {
+            only_alphanumeric: true,
+            symbols: "!@#".to_string(),
+            ..default_config()
+        };
+        let err = generate(&cfg).unwrap_err();
+        assert_eq!(
+            err,
+            Error::ConflictingOptions(
+                "cannot specify custom symbols when only-alphanumeric is enabled".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_generate_conflicting_symbols_with_no_symbols() {
+        let cfg = Config {
+            no_symbols: true,
+            symbols: "!@#".to_string(),
+            ..default_config()
+        };
+        let err = generate(&cfg).unwrap_err();
+        assert_eq!(
+            err,
+            Error::ConflictingOptions(
+                "cannot specify custom symbols when no-symbols is enabled".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_generate_length_smaller_than_active_groups_distinct() {
+        // With 4 groups active and length 2:
+        for _ in 0..50 {
+            let cfg = Config {
+                length: 2,
+                ..default_config()
+            };
+            let (pw, pool_size) = generate(&cfg).unwrap();
+            assert_eq!(pw.len(), 2);
+            assert_eq!(pool_size, 68);
+
+            let mut groups = std::collections::HashSet::new();
+            for c in pw.chars() {
+                if UPPER.contains(c) {
+                    groups.insert("upper");
+                } else if LOWER.contains(c) {
+                    groups.insert("lower");
+                } else if DIGITS.contains(c) {
+                    groups.insert("digits");
+                } else if SPECIAL.contains(c) {
+                    groups.insert("special");
+                }
+            }
+            assert_eq!(
+                groups.len(),
+                2,
+                "Both characters must come from distinct groups"
+            );
+        }
+    }
+
+    #[test]
     fn test_zero_vec() {
         let mut v = vec!['a', 'B', '3', '!'];
         zero_vec(&mut v);
-        assert!(v.iter().all(|c| *c == '\0'));
+        assert!(v.is_empty());
 
         let mut empty: Vec<char> = Vec::new();
         zero_vec(&mut empty);

@@ -1,0 +1,28 @@
+# cargo-deny configuration for rustpass
+
+[advisories]
+version = 2
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "BSD-3-Clause",
+]
+confidence-threshold = 0.8
+
+[bans]
+version = 2
+multiple-versions = "warn"
+deny = []
+
+[sources]
+version = 2
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

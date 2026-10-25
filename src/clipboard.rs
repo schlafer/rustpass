@@ -1,6 +1,8 @@
 use base64::Engine;
 use std::io::Write;
 
+use crate::error::Error;
+
 const CLIPBOARD_COMMANDS: &[(&str, &[&str])] = &[
     ("wl-copy", &[]),
     ("xclip", &["-selection", "clipboard"]),
@@ -21,20 +23,23 @@ fn format_osc52_sequence(text: &str, is_tmux: bool) -> String {
 }
 
 /// Writes the OSC 52 sequence to `/dev/tty` if available, or falls back to stderr.
-fn write_osc52(text: &str) -> Result<(), String> {
+fn write_osc52(text: &str) -> Result<(), Error> {
     let is_tmux = std::env::var_os("TMUX").is_some();
     let seq = format_osc52_sequence(text, is_tmux);
 
     if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-        tty.write_all(seq.as_bytes()).map_err(|e| e.to_string())?;
-        tty.flush().map_err(|e| e.to_string())?;
+        tty.write_all(seq.as_bytes())
+            .map_err(|e| Error::Clipboard(e.to_string()))?;
+        tty.flush().map_err(|e| Error::Clipboard(e.to_string()))?;
         Ok(())
     } else {
         let mut stderr = std::io::stderr();
         stderr
             .write_all(seq.as_bytes())
-            .map_err(|e| e.to_string())?;
-        stderr.flush().map_err(|e| e.to_string())?;
+            .map_err(|e| Error::Clipboard(e.to_string()))?;
+        stderr
+            .flush()
+            .map_err(|e| Error::Clipboard(e.to_string()))?;
         Ok(())
     }
 }
@@ -44,7 +49,7 @@ fn write_osc52(text: &str) -> Result<(), String> {
 /// Tries platform-native tools in order (`wl-copy`, `xclip`, `xsel`, `pbcopy`, `clip.exe`).
 /// If a native tool succeeds, returns `Ok(())` immediately.
 /// Otherwise, falls back to emitting an OSC 52 escape sequence.
-pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+pub fn copy_to_clipboard(text: &str) -> Result<(), Error> {
     for (cmd, args) in CLIPBOARD_COMMANDS {
         let spawned = std::process::Command::new(cmd)
             .args(*args)
@@ -68,8 +73,10 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
     // Fall back to OSC 52 only if all native tools fail
     write_osc52(text).map_err(|_| {
-        "could not copy to clipboard (install xclip, wl-copy, or use an OSC 52 compatible terminal)"
-            .to_string()
+        Error::Clipboard(
+            "could not copy to clipboard (install xclip, wl-copy, or use an OSC 52 compatible terminal)"
+                .to_string(),
+        )
     })
 }
 

@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+use zeroize::Zeroize;
+
+use crate::error::Error;
 use crate::generator::secure_random;
 use crate::wordlist::DEFAULT_WORDLIST;
 
@@ -40,30 +44,43 @@ fn capitalize_word(word: &str) -> String {
     }
 }
 
-pub fn generate_passphrase(cfg: &PassphraseConfig) -> Result<(String, usize), String> {
+pub fn generate_passphrase(cfg: &PassphraseConfig) -> Result<(String, usize), Error> {
     if cfg.word_count == 0 {
-        return Err("word count must be greater than 0".to_string());
+        return Err(Error::InvalidLength(
+            "word count must be greater than 0".to_string(),
+        ));
     }
 
-    let wordlist_len = match &cfg.word_list {
+    let cleaned_custom: Option<Vec<String>> = cfg.word_list.as_ref().map(|custom| {
+        let mut seen = HashSet::new();
+        custom
+            .iter()
+            .map(|w| w.trim().to_string())
+            .filter(|w| !w.is_empty() && seen.insert(w.clone()))
+            .collect()
+    });
+
+    let (wordlist_len, custom_words_ref) = match &cleaned_custom {
         Some(custom) => {
             if custom.is_empty() {
-                return Err("wordlist is empty".to_string());
+                return Err(Error::InvalidWordlist(
+                    "wordlist has no valid non-empty words".to_string(),
+                ));
             }
-            custom.len()
+            (custom.len(), Some(custom))
         }
         None => {
             if DEFAULT_WORDLIST.is_empty() {
-                return Err("wordlist is empty".to_string());
+                return Err(Error::InvalidWordlist("wordlist is empty".to_string()));
             }
-            DEFAULT_WORDLIST.len()
+            (DEFAULT_WORDLIST.len(), None)
         }
     };
 
     let mut selected_words = Vec::with_capacity(cfg.word_count);
     for _ in 0..cfg.word_count {
         let idx = secure_random(0, wordlist_len - 1);
-        let word_str = match &cfg.word_list {
+        let word_str = match custom_words_ref {
             Some(custom) => custom[idx].as_str(),
             None => DEFAULT_WORDLIST[idx],
         };
@@ -79,6 +96,10 @@ pub fn generate_passphrase(cfg: &PassphraseConfig) -> Result<(String, usize), St
     if cfg.include_number {
         let num = secure_random(0, 99);
         result.push_str(&format!("{}{}", cfg.separator, num));
+    }
+
+    for mut w in selected_words {
+        w.zeroize();
     }
 
     Ok((result, wordlist_len))
@@ -178,6 +199,46 @@ mod tests {
             ..Default::default()
         };
         assert!(generate_passphrase(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_passphrase_custom_wordlist_deduplication_and_whitespace() {
+        let custom = vec![
+            "apple".to_string(),
+            "  apple  ".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "banana".to_string(),
+            "banana".to_string(),
+        ];
+        let cfg = PassphraseConfig {
+            word_list: Some(custom),
+            word_count: 2,
+            ..Default::default()
+        };
+        let (pp, wl_size) = generate_passphrase(&cfg).unwrap();
+        // Only 2 unique non-empty words: "apple" and "banana"
+        assert_eq!(wl_size, 2);
+        let words: Vec<&str> = pp.split('-').collect();
+        assert_eq!(words.len(), 2);
+        for w in words {
+            assert!(w == "apple" || w == "banana");
+        }
+    }
+
+    #[test]
+    fn test_passphrase_custom_wordlist_all_empty_errors() {
+        let custom = vec!["".to_string(), "   ".to_string()];
+        let cfg = PassphraseConfig {
+            word_list: Some(custom),
+            word_count: 2,
+            ..Default::default()
+        };
+        let err = generate_passphrase(&cfg).unwrap_err();
+        assert_eq!(
+            err,
+            Error::InvalidWordlist("wordlist has no valid non-empty words".to_string())
+        );
     }
 
     #[test]
