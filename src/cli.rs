@@ -6,9 +6,10 @@ use zeroize::Zeroize;
 
 use crate::clipboard::copy_to_clipboard;
 use crate::entropy::{
-    calculate_entropy, calculate_passphrase_entropy_with_number, shannon_entropy, strength_rating,
+    calculate_partitioned_entropy, calculate_passphrase_entropy_with_number, floor_entropy,
+    min_length_for_entropy, shannon_entropy, strength_rating,
 };
-use crate::generator::{effective_pool_size, generate, Config};
+use crate::generator::{build_active_groups, generate, Config};
 use crate::passphrase::{generate_passphrase, PassphraseConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
@@ -171,6 +172,26 @@ pub fn run() {
     }
 }
 
+fn validate_min_entropy(min_ent: f64, stderr: &mut dyn std::io::Write) -> Result<(), ()> {
+    if !min_ent.is_finite() {
+        writeln!(stderr, "Error: --min-entropy must be a finite number").ok();
+        return Err(());
+    }
+    if min_ent <= 0.0 {
+        writeln!(stderr, "Error: --min-entropy must be greater than 0").ok();
+        return Err(());
+    }
+    if min_ent > 10000.0 {
+        writeln!(
+            stderr,
+            "Error: --min-entropy target is unreasonably large (max: 10000)"
+        )
+        .ok();
+        return Err(());
+    }
+    Ok(())
+}
+
 pub fn execute_args(
     args: &Args,
     stdout: &mut dyn std::io::Write,
@@ -307,22 +328,13 @@ pub fn execute_args(
     }
 
     if let Some(min_ent) = args.min_entropy {
-        if min_ent <= 0.0 {
-            writeln!(stderr, "Error: --min-entropy must be greater than 0").ok();
-            return Err(1);
-        }
-        if min_ent > 10000.0 {
-            writeln!(
-                stderr,
-                "Error: --min-entropy target is unreasonably large (max: 10000)"
-            )
-            .ok();
+        if validate_min_entropy(min_ent, stderr).is_err() {
             return Err(1);
         }
 
         if is_passphrase {
-            let wordlist_size = crate::wordlist::DEFAULT_WORDLIST.len() as f64;
-            let bits_per_word = wordlist_size.log2();
+            let wordlist_size = crate::wordlist::DEFAULT_WORDLIST.len();
+            let bits_per_word = (wordlist_size as f64).log2();
             let num_bits = if include_number {
                 (100.0_f64).log2()
             } else {
@@ -333,12 +345,13 @@ pub fn execute_args(
             let required_words = required_words.max(1);
 
             if let Some(w) = words_opt {
-                let actual_entropy = (w as f64) * bits_per_word + num_bits;
+                let actual_entropy =
+                    calculate_passphrase_entropy_with_number(w, wordlist_size, include_number);
                 if actual_entropy < min_ent {
                     writeln!(
                         stderr,
                         "Error: specified word count {} yields approximately {:.1} bits of entropy, which is less than requested minimum of {:.1} bits (requires {} words)",
-                        w, actual_entropy, min_ent, required_words
+                        w, floor_entropy(actual_entropy), min_ent, required_words
                     ).ok();
                     return Err(1);
                 }
@@ -357,32 +370,33 @@ pub fn execute_args(
                 exclude_ambiguous,
                 exclude_chars: args.exclude.clone(),
             };
-            let pool_size = match effective_pool_size(&temp_cfg) {
-                Ok(size) => size,
+            let groups = match build_active_groups(&temp_cfg) {
+                Ok(g) => g,
                 Err(e) => {
                     writeln!(stderr, "Error: {}", e).ok();
                     return Err(1);
                 }
             };
-            if pool_size <= 1 {
-                writeln!(
-                    stderr,
-                    "Error: character pool size is too small to satisfy minimum entropy"
-                )
-                .ok();
-                return Err(1);
-            }
-            let bits_per_char = (pool_size as f64).log2();
-            let required_length = (min_ent / bits_per_char).ceil() as usize;
-            let required_length = required_length.max(1);
+            let group_sizes: Vec<usize> = groups.iter().map(|g| g.chars().count()).collect();
+            let required_length = match min_length_for_entropy(&group_sizes, min_ent) {
+                Some(len) => len,
+                None => {
+                    writeln!(
+                        stderr,
+                        "Error: character pool configuration cannot satisfy minimum entropy target"
+                    )
+                    .ok();
+                    return Err(1);
+                }
+            };
 
             if let Some(l) = length_opt {
-                let actual_entropy = (l as f64) * bits_per_char;
+                let actual_entropy = calculate_partitioned_entropy(&group_sizes, l);
                 if actual_entropy < min_ent {
                     writeln!(
                         stderr,
                         "Error: specified length {} yields approximately {:.1} bits of entropy, which is less than requested minimum of {:.1} bits (requires length {})",
-                        l, actual_entropy, min_ent, required_length
+                        l, floor_entropy(actual_entropy), min_ent, required_length
                     ).ok();
                     return Err(1);
                 }
@@ -425,20 +439,35 @@ pub fn execute_args(
         word_list: None,
     };
 
+    let (overall_pool_size, overall_entropy) = if is_passphrase {
+        let pool_size = crate::wordlist::DEFAULT_WORDLIST.len();
+        let entropy =
+            calculate_passphrase_entropy_with_number(final_words, pool_size, include_number);
+        (pool_size, entropy)
+    } else {
+        let groups = match build_active_groups(&cfg) {
+            Ok(g) => g,
+            Err(err) => {
+                writeln!(stderr, "Error: {}", err).ok();
+                return Err(1);
+            }
+        };
+        let pool_size: usize = groups.iter().map(|g| g.chars().count()).sum();
+        let group_sizes: Vec<usize> = groups.iter().map(|g| g.chars().count()).collect();
+        let entropy = calculate_partitioned_entropy(&group_sizes, final_length);
+        (pool_size, entropy)
+    };
+
+    let floored_ent = floor_entropy(overall_entropy);
+    let rating = strength_rating(floored_ent);
+
     let mut results: Vec<String> = Vec::with_capacity(args.count);
     let mut json_entries: Vec<JsonPasswordEntry> = Vec::with_capacity(args.count);
 
     for _ in 0..args.count {
-        let (output, pool_size, entropy) = if is_passphrase {
+        let output = if is_passphrase {
             match generate_passphrase(&pass_cfg) {
-                Ok((passphrase, pool_size)) => {
-                    let entropy = calculate_passphrase_entropy_with_number(
-                        final_words,
-                        pool_size,
-                        include_number,
-                    );
-                    (passphrase, pool_size, entropy)
-                }
+                Ok((passphrase, _)) => passphrase,
                 Err(err) => {
                     writeln!(stderr, "Error: {}", err).ok();
                     return Err(1);
@@ -446,10 +475,7 @@ pub fn execute_args(
             }
         } else {
             match generate(&cfg) {
-                Ok((password, pool_size)) => {
-                    let entropy = calculate_entropy(&password, pool_size);
-                    (password, pool_size, entropy)
-                }
+                Ok((password, _)) => password,
                 Err(err) => {
                     writeln!(stderr, "Error: {}", err).ok();
                     return Err(1);
@@ -462,7 +488,7 @@ pub fn execute_args(
                 value: output.clone(),
                 length: output.chars().count(),
                 entropy_bits: if args.entropy {
-                    Some((entropy * 10.0).round() / 10.0)
+                    Some(floored_ent)
                 } else {
                     None
                 },
@@ -471,25 +497,34 @@ pub fn execute_args(
                 } else {
                     None
                 },
-                pool_size: if args.entropy { Some(pool_size) } else { None },
+                pool_size: if args.entropy {
+                    Some(overall_pool_size)
+                } else {
+                    None
+                },
                 strength_rating: if args.entropy {
-                    Some(strength_rating(entropy).to_string())
+                    Some(rating.to_string())
                 } else {
                     None
                 },
             });
         } else if args.entropy && !args.copy_only {
-            let rating = strength_rating(entropy);
             if args.count == 1 {
                 writeln!(stdout, "{}", output).ok();
                 if !args.quiet {
-                    print_entropy_diagnostics_to(&output, entropy, pool_size, stderr);
+                    print_entropy_diagnostics_to(
+                        &output,
+                        floored_ent,
+                        rating,
+                        overall_pool_size,
+                        stderr,
+                    );
                 }
             } else {
                 writeln!(
                     stdout,
                     "{:<24} [Entropy: {:.1} bits, Strength: {}]",
-                    output, entropy, rating
+                    output, floored_ent, rating
                 )
                 .ok();
             }
@@ -563,10 +598,10 @@ fn handle_copy(text: &str, stderr: &mut dyn std::io::Write, quiet: bool) -> Resu
 fn print_entropy_diagnostics_to(
     output: &str,
     entropy: f64,
+    rating: &str,
     pool_size: usize,
     stderr: &mut dyn std::io::Write,
 ) {
-    let rating = strength_rating(entropy);
     let shannon = shannon_entropy(output);
     writeln!(
         stderr,
@@ -904,13 +939,13 @@ mod tests {
 
     #[test]
     fn test_execute_passphrase_entropy_includes_number() {
-        // Without number: 4 words -> ~41.4 bits
+        // Without number: 4 words -> 4 * log2(1296) ≈ 41.359 bits floored to 41.3 bits
         let args_without = Args::try_parse_from(["rustpass", "-p", "-E"]).unwrap();
         let mut out_without = Vec::new();
         let mut err_without = Vec::new();
         execute_args(&args_without, &mut out_without, &mut err_without).unwrap();
         let err_str_without = String::from_utf8(err_without).unwrap();
-        assert!(err_str_without.contains("Entropy:   41.4 bits"));
+        assert!(err_str_without.contains("Entropy:   41.3 bits"));
 
         // With number: 4 words + number -> ~48.0 bits
         let args_with = Args::try_parse_from(["rustpass", "-p", "-E", "--include-number"]).unwrap();
@@ -986,14 +1021,14 @@ mod tests {
 
     #[test]
     fn test_execute_min_entropy_standard_password() {
-        // Pool is 68 -> log2(68) ≈ 6.087 bits/char. 100 bits requires ceil(100/6.087) = 17 chars.
+        // Under partitioned generation, 17 chars yields 93.6 bits, while 18 chars achieves 100.15 bits (>= 100).
         let args = Args::try_parse_from(["rustpass", "--min-entropy", "100"]).unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let res = execute_args(&args, &mut stdout, &mut stderr);
         assert_eq!(res, Ok(()));
         let out = String::from_utf8(stdout).unwrap().trim().to_string();
-        assert_eq!(out.len(), 17);
+        assert_eq!(out.len(), 18);
     }
 
     #[test]
@@ -1051,5 +1086,157 @@ mod tests {
         assert_eq!(res, Ok(()));
         let out = String::from_utf8(stdout).unwrap();
         assert!(out.contains(".TH rustpass") || out.contains("rustpass"));
+    }
+
+    #[test]
+    fn test_execute_min_entropy_validation() {
+        let make_args = |min_ent: f64| Args {
+            length: None,
+            count: 1,
+            preset: None,
+            min_entropy: Some(min_ent),
+            format: OutputFormat::Text,
+            quiet: false,
+            no_upper: false,
+            no_lower: false,
+            no_digits: false,
+            no_symbols: false,
+            only_alphanumeric: false,
+            symbols: String::new(),
+            exclude_ambiguous: false,
+            exclude: String::new(),
+            passphrase: false,
+            words: None,
+            separator: None,
+            capitalize: false,
+            include_number: false,
+            copy: false,
+            copy_only: false,
+            entropy: false,
+            no_newline: false,
+            completions: None,
+            man: false,
+            version: false,
+        };
+
+        // 1. NaN
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(f64::NAN), &mut stdout, &mut stderr),
+            Err(1)
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("must be a finite number"));
+
+        // 2. Infinity
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(f64::INFINITY), &mut stdout, &mut stderr),
+            Err(1)
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("must be a finite number"));
+
+        // 3. Negative Infinity
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(f64::NEG_INFINITY), &mut stdout, &mut stderr),
+            Err(1)
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("must be a finite number"));
+
+        // 4. Zero
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(0.0), &mut stdout, &mut stderr),
+            Err(1)
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("greater than 0"));
+
+        // 5. Negative
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(-1.0), &mut stdout, &mut stderr),
+            Err(1)
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("greater than 0"));
+
+        // 6. Too large
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(10001.0), &mut stdout, &mut stderr),
+            Err(1)
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("unreasonably large"));
+
+        // 7. Tiny positive
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(0.001), &mut stdout, &mut stderr),
+            Ok(())
+        );
+        assert_eq!(String::from_utf8(stdout).unwrap().trim().len(), 1);
+
+        // 8. Valid target
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            execute_args(&make_args(50.0), &mut stdout, &mut stderr),
+            Ok(())
+        );
+        assert_eq!(String::from_utf8(stdout).unwrap().trim().len(), 10);
+    }
+
+    #[test]
+    fn test_entropy_text_and_json_consistency() {
+        for len in [8, 12, 16, 20] {
+            // JSON execution
+            let args_json =
+                Args::try_parse_from(["rustpass", "-l", &len.to_string(), "-f", "json", "-E"])
+                    .unwrap();
+            let mut stdout_json = Vec::new();
+            let mut stderr_json = Vec::new();
+            execute_args(&args_json, &mut stdout_json, &mut stderr_json).unwrap();
+            let json_resp: JsonResponse =
+                serde_json::from_str(&String::from_utf8(stdout_json).unwrap()).unwrap();
+            let json_bits = json_resp.passwords[0].entropy_bits.unwrap();
+            let json_rating = json_resp.passwords[0].strength_rating.as_ref().unwrap();
+
+            // Text execution
+            let args_text =
+                Args::try_parse_from(["rustpass", "-l", &len.to_string(), "-E"]).unwrap();
+            let mut stdout_text = Vec::new();
+            let mut stderr_text = Vec::new();
+            execute_args(&args_text, &mut stdout_text, &mut stderr_text).unwrap();
+            let err_text = String::from_utf8(stderr_text).unwrap();
+
+            assert!(err_text.contains(&format!(
+                "Entropy:   {:.1} bits ({})",
+                json_bits, json_rating
+            )));
+        }
     }
 }

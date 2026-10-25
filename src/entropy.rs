@@ -2,21 +2,161 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// Calculates the theoretical keyspace entropy in bits based on length and pool size.
+use crate::error::Error;
+use crate::generator::{allocate_group_counts, build_active_groups, Config};
+
+/// Helper to compute log2(n!) = sum_{i=1}^n log2(i).
+fn log2_factorial(n: usize) -> f64 {
+    (1..=n).map(|i| (i as f64).log2()).sum()
+}
+
+/// Calculates the theoretical keyspace entropy in bits for the partitioned character generator.
 ///
-/// # Assumptions & Model
-/// This formula computes `L * log2(pool_size)`, which is an **upper-bound estimate**
-/// assuming that each character is independently and uniformly selected from the entire
-/// effective pool.
+/// # Mathematical Model
+/// Let `k` be the number of active, non-empty disjoint character groups (`group_sizes.len()`),
+/// `s_g` be the size of group `g` (`group_sizes[g]`), and `L` be the desired password `length`.
 ///
-/// **Note on Partitioned Generation:** When character groups are partitioned (such as
-/// in `generator::generate` which guarantees representation of each enabled group by
-/// dividing length across groups), the true keyspace size is strictly smaller than
-/// `pool_size^L`. For instance, a 12-character password with 4 default groups (pool 68)
-/// has a true keyspace entropy of ~64.4 bits rather than the simple i.i.d. estimate of ~73.0 bits.
+/// ## Case 1: `L >= k`
+/// When length is at least the number of active groups, each group `g` is allocated a deterministic
+/// number of characters `n_g` via [`allocate_group_counts`]:
+/// - `n_g = L / k + 1` for the first `L % k` groups
+/// - `n_g = L / k` for the remaining groups
 ///
-/// This estimate is a useful upper bound for comparing configurations, but should not
-/// be taken as an absolute guarantee of password unguessability under targeted attacks.
+/// Characters are selected uniformly and independently with replacement from each group, and the
+/// resulting multiset of characters is shuffled uniformly at random across all `L!` permutations.
+/// Because every resulting password is generated with equal probability, the entropy is exact:
+///
+/// ```text
+/// H = log2(L! / prod(n_g!)) + sum(n_g * log2(s_g))
+///   = log2(L!) - sum(log2(n_g!)) + sum(n_g * log2(s_g))
+/// ```
+///
+/// ## Case 2: `L < k`
+/// When length is strictly less than the number of active groups, the generator chooses `L` distinct
+/// groups uniformly at random without replacement from the `k` available groups, draws one character
+/// uniformly from each chosen group, and shuffles them.
+///
+/// When group sizes differ, the resulting probability distribution across generated strings is not
+/// uniform. We compute the min-entropy (the negative log2 of the maximum probability, `-log2(p_max)`),
+/// which provides a conservative, robust bound on guess resistance:
+///
+/// ```text
+/// H_min = log2(k! / (k - L)!) + sum(log2(s_g) for the L smallest s_g)
+/// ```
+///
+/// Returns `0.0` if `length == 0`, `group_sizes` is empty, or any group size is `0`.
+pub fn calculate_partitioned_entropy(group_sizes: &[usize], length: usize) -> f64 {
+    if length == 0 || group_sizes.is_empty() || group_sizes.contains(&0) {
+        return 0.0;
+    }
+
+    let k = group_sizes.len();
+    if length >= k {
+        let counts = allocate_group_counts(length, k);
+        let mut bits = log2_factorial(length);
+        for (g, &count) in counts.iter().enumerate() {
+            bits -= log2_factorial(count);
+            bits += count as f64 * (group_sizes[g] as f64).log2();
+        }
+        bits.max(0.0)
+    } else {
+        // L < k: log2(k! / (k - L)!) + sum of the L smallest log2(s_g)
+        let perm_bits: f64 = ((k - length + 1)..=k).map(|i| (i as f64).log2()).sum();
+        let mut sorted_sizes = group_sizes.to_vec();
+        sorted_sizes.sort_unstable();
+        let smallest_sum: f64 = sorted_sizes[..length]
+            .iter()
+            .map(|&s| (s as f64).log2())
+            .sum();
+        (perm_bits + smallest_sum).max(0.0)
+    }
+}
+
+/// Builds active character groups from a [`Config`] and calculates exact partitioned entropy.
+pub fn calculate_config_entropy(cfg: &Config) -> Result<f64, Error> {
+    let groups = build_active_groups(cfg)?;
+    let sizes: Vec<usize> = groups.iter().map(|g| g.chars().count()).collect();
+    Ok(calculate_partitioned_entropy(&sizes, cfg.length))
+}
+
+/// Finds the minimum password length required to achieve at least `target` bits of entropy
+/// for the given `group_sizes`.
+///
+/// Uses an exponential search (doubling) to establish an upper bound, followed by binary
+/// search. Returns `None` if the target is unreachable (e.g. non-finite/non-positive target,
+/// empty group sizes, or a single group of size 1 where entropy is 0 for all lengths).
+pub fn min_length_for_entropy(group_sizes: &[usize], target: f64) -> Option<usize> {
+    if !target.is_finite() || target <= 0.0 || group_sizes.is_empty() {
+        return None;
+    }
+    if group_sizes.len() == 1 && group_sizes[0] <= 1 {
+        return None;
+    }
+
+    // Sane upper cap for length search
+    const MAX_LEN: usize = 100_000;
+
+    if calculate_partitioned_entropy(group_sizes, 1) >= target {
+        return Some(1);
+    }
+
+    let mut high = 1;
+    while calculate_partitioned_entropy(group_sizes, high) < target {
+        let next = high.saturating_mul(2);
+        if next == high || high >= MAX_LEN {
+            if calculate_partitioned_entropy(group_sizes, MAX_LEN) < target {
+                return None;
+            }
+            high = MAX_LEN;
+            break;
+        }
+
+        let cur_ent = calculate_partitioned_entropy(group_sizes, high);
+        let next_ent = calculate_partitioned_entropy(group_sizes, next);
+        if next_ent <= cur_ent && next_ent == 0.0 {
+            return None;
+        }
+
+        high = next.min(MAX_LEN);
+    }
+
+    let mut low = high / 2;
+    let mut ans = high;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        if calculate_partitioned_entropy(group_sizes, mid) >= target {
+            ans = mid;
+            if mid == 0 {
+                break;
+            }
+            high = mid - 1;
+        } else {
+            low = mid + 1;
+        }
+    }
+    Some(ans)
+}
+
+/// Floors entropy to one decimal place with a tiny epsilon (`floor(bits * 10 + 1e-9) / 10`),
+/// ensuring that the displayed value never exceeds the true entropy.
+pub fn floor_entropy(bits: f64) -> f64 {
+    if !bits.is_finite() || bits <= 0.0 {
+        0.0
+    } else {
+        (bits * 10.0 + 1e-9).floor() / 10.0
+    }
+}
+
+/// Calculates the theoretical keyspace entropy in bits assuming independent, identically
+/// distributed (i.i.d.) character selection: `L * log2(pool_size)`.
+///
+/// # Compatibility Note
+/// This formula computes an **upper-bound estimate** assuming each character is independently
+/// and uniformly drawn from the entire character pool. It does **not** model the partitioned
+/// generation algorithm used by RustPass.
+///
+/// To calculate the exact entropy of passwords generated by RustPass, use
+/// [`calculate_partitioned_entropy`] or [`calculate_config_entropy`].
 ///
 /// If password is empty or pool_size <= 1, returns 0.0.
 /// If pool_size is 0, dynamically estimates the pool size from the password.
@@ -284,5 +424,353 @@ mod tests {
         // Many specials (> 6)
         assert_eq!(estimate_pool_size("!@#$%^&*"), 32);
         assert_eq!(estimate_pool_size("aB3!@#$%^&*"), 26 + 26 + 10 + 32);
+    }
+
+    fn helper_permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.is_empty() {
+            return vec![Vec::new()];
+        }
+        let mut res = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let elem = rest.remove(i);
+            for mut p in helper_permutations(&rest) {
+                p.insert(0, elem.clone());
+                res.push(p);
+            }
+        }
+        res
+    }
+
+    fn helper_cartesian_product<T: Clone>(pools: &[Vec<T>]) -> Vec<Vec<T>> {
+        if pools.is_empty() {
+            return vec![Vec::new()];
+        }
+        let mut result = vec![Vec::new()];
+        for pool in pools {
+            let mut next = Vec::new();
+            for r in &result {
+                for item in pool {
+                    let mut new_r = r.clone();
+                    new_r.push(item.clone());
+                    next.push(new_r);
+                }
+            }
+            result = next;
+        }
+        result
+    }
+
+    fn helper_combinations_indices(n: usize, k: usize) -> Vec<Vec<usize>> {
+        if k == 0 {
+            return vec![Vec::new()];
+        }
+        if n < k {
+            return Vec::new();
+        }
+        let mut res = Vec::new();
+        fn recurse(
+            start: usize,
+            n: usize,
+            k: usize,
+            current: &mut Vec<usize>,
+            res: &mut Vec<Vec<usize>>,
+        ) {
+            if current.len() == k {
+                res.push(current.clone());
+                return;
+            }
+            for i in start..n {
+                current.push(i);
+                recurse(i + 1, n, k, current, res);
+                current.pop();
+            }
+        }
+        recurse(0, n, k, &mut Vec::new(), &mut res);
+        res
+    }
+
+    fn enumerate_distribution(groups: &[&str], length: usize) -> HashMap<String, f64> {
+        let k = groups.len();
+        let mut dist = HashMap::new();
+
+        if length >= k {
+            let counts = allocate_group_counts(length, k);
+            let mut group_choices = Vec::new();
+            for (g, &count) in counts.iter().enumerate() {
+                let chars: Vec<char> = groups[g].chars().collect();
+                let mut single_group_pools = Vec::new();
+                for _ in 0..count {
+                    single_group_pools.push(chars.clone());
+                }
+                let draws = helper_cartesian_product(&single_group_pools);
+                group_choices.push(draws);
+            }
+            let all_selections = helper_cartesian_product(&group_choices);
+            for selection in all_selections {
+                let mut flat_chars = Vec::new();
+                let mut draw_prob = 1.0;
+                for (g, draws) in selection.iter().enumerate() {
+                    for &c in draws {
+                        flat_chars.push(c);
+                        draw_prob /= groups[g].len() as f64;
+                    }
+                }
+                let perms = helper_permutations(&flat_chars);
+                let perm_prob = draw_prob / perms.len() as f64;
+                for p in perms {
+                    let s: String = p.into_iter().collect();
+                    *dist.entry(s).or_insert(0.0) += perm_prob;
+                }
+            }
+        } else {
+            let comb_indices = helper_combinations_indices(k, length);
+            let prob_comb = 1.0 / comb_indices.len() as f64;
+            for subset in comb_indices {
+                let mut pools = Vec::new();
+                let mut draw_prob = prob_comb;
+                for &g in &subset {
+                    let chars: Vec<char> = groups[g].chars().collect();
+                    draw_prob /= chars.len() as f64;
+                    pools.push(chars);
+                }
+                let draws = helper_cartesian_product(&pools);
+                for d in draws {
+                    let perms = helper_permutations(&d);
+                    let perm_prob = draw_prob / perms.len() as f64;
+                    for p in perms {
+                        let s: String = p.into_iter().collect();
+                        *dist.entry(s).or_insert(0.0) += perm_prob;
+                    }
+                }
+            }
+        }
+        dist
+    }
+
+    #[test]
+    fn test_partitioned_entropy_exhaustive_enumeration_two_groups() {
+        let groups = ["ab", "c"];
+        let sizes = [2, 1];
+
+        // L < k: L = 1
+        let dist1 = enumerate_distribution(&groups, 1);
+        let p_max1 = dist1.values().cloned().fold(0.0, f64::max);
+        let min_ent1 = -p_max1.log2();
+        let formula1 = calculate_partitioned_entropy(&sizes, 1);
+        assert!((formula1 - min_ent1).abs() < 1e-10);
+
+        // L == k: L = 2
+        let dist2 = enumerate_distribution(&groups, 2);
+        let h2: f64 = dist2.values().map(|&p| -p * p.log2()).sum();
+        let formula2 = calculate_partitioned_entropy(&sizes, 2);
+        assert!((formula2 - h2).abs() < 1e-10);
+
+        // L > k: L = 3
+        let dist3 = enumerate_distribution(&groups, 3);
+        let h3: f64 = dist3.values().map(|&p| -p * p.log2()).sum();
+        let formula3 = calculate_partitioned_entropy(&sizes, 3);
+        assert!((formula3 - h3).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_partitioned_entropy_exhaustive_enumeration_three_groups_non_uniform() {
+        let groups = ["a", "bc", "d"];
+        let sizes = [1, 2, 1];
+
+        // L < k: L = 1
+        let dist1 = enumerate_distribution(&groups, 1);
+        let p_max1 = dist1.values().cloned().fold(0.0, f64::max);
+        let min_ent1 = -p_max1.log2();
+        let formula1 = calculate_partitioned_entropy(&sizes, 1);
+        assert!((formula1 - min_ent1).abs() < 1e-10);
+
+        // L < k: L = 2 (non-uniform subset probabilities: {a, bc} vs {a, d})
+        let dist2 = enumerate_distribution(&groups, 2);
+        let p_max2 = dist2.values().cloned().fold(0.0, f64::max);
+        let min_ent2 = -p_max2.log2();
+        let formula2 = calculate_partitioned_entropy(&sizes, 2);
+        assert!((formula2 - min_ent2).abs() < 1e-10);
+
+        // L == k: L = 3
+        let dist3 = enumerate_distribution(&groups, 3);
+        let h3: f64 = dist3.values().map(|&p| -p * p.log2()).sum();
+        let formula3 = calculate_partitioned_entropy(&sizes, 3);
+        assert!((formula3 - h3).abs() < 1e-10);
+
+        // L > k: L = 4
+        let dist4 = enumerate_distribution(&groups, 4);
+        let h4: f64 = dist4.values().map(|&p| -p * p.log2()).sum();
+        let formula4 = calculate_partitioned_entropy(&sizes, 4);
+        assert!((formula4 - h4).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_partitioned_entropy_default_config_known_lengths() {
+        let default_sizes = [26, 26, 10, 6];
+
+        // Length 1 (L < 4): log2(4!/3!) + log2(6) = 2.0 + 2.5849625 ≈ 4.58496
+        let e1 = calculate_partitioned_entropy(&default_sizes, 1);
+        assert!((e1 - 4.5849625).abs() < 1e-4);
+
+        // Length 2 (L < 4): log2(4!/2!) + log2(6) + log2(10) ≈ 3.5849625 + 5.90689 ≈ 9.49185
+        let e2 = calculate_partitioned_entropy(&default_sizes, 2);
+        assert!((e2 - 9.491853).abs() < 1e-4);
+
+        // Length 3 (L < 4): log2(4!/1!) + log2(6) + log2(10) + log2(26) ≈ 15.19229
+        let e3 = calculate_partitioned_entropy(&default_sizes, 3);
+        assert!((e3 - 15.192297).abs() < 1e-4);
+
+        // Length 4 (L >= 4): log2(4!/1!) + 2*log2(26) + log2(10) + log2(6) ≈ 19.89274
+        let e4 = calculate_partitioned_entropy(&default_sizes, 4);
+        assert!((e4 - 19.892741).abs() < 1e-4);
+
+        // Length 12: ~64.41888
+        let e12 = calculate_partitioned_entropy(&default_sizes, 12);
+        assert!((e12 - 64.41888).abs() < 1e-3);
+
+        // Length 16: ~87.14144
+        let e16 = calculate_partitioned_entropy(&default_sizes, 16);
+        assert!((e16 - 87.14144).abs() < 1e-3);
+
+        // Length 20: ~109.98922 (about 109.99 bits)
+        let e20 = calculate_partitioned_entropy(&default_sizes, 20);
+        assert!((e20 - 109.98922).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_partitioned_entropy_custom_configs() {
+        use crate::generator::default_config;
+
+        let configs = [
+            Config {
+                no_symbols: true,
+                ..default_config()
+            },
+            Config {
+                only_alphanumeric: true,
+                ..default_config()
+            },
+            Config {
+                no_upper: true,
+                ..default_config()
+            },
+            Config {
+                no_lower: true,
+                ..default_config()
+            },
+            Config {
+                no_digits: true,
+                ..default_config()
+            },
+            Config {
+                exclude_ambiguous: true,
+                ..default_config()
+            },
+            Config {
+                symbols: "!@#".to_string(),
+                ..default_config()
+            },
+            Config {
+                symbols: "aA1!".to_string(),
+                ..default_config()
+            },
+            Config {
+                exclude_chars: "abc".to_string(),
+                ..default_config()
+            },
+        ];
+
+        for cfg in &configs {
+            let ent = calculate_config_entropy(cfg).expect("valid config must compute entropy");
+            assert!(ent > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_partitioned_entropy_monotonicity() {
+        use crate::generator::default_config;
+
+        let base_configs = [
+            default_config(),
+            Config {
+                no_symbols: true,
+                ..default_config()
+            },
+            Config {
+                only_alphanumeric: true,
+                ..default_config()
+            },
+            Config {
+                exclude_ambiguous: true,
+                ..default_config()
+            },
+            Config {
+                symbols: "!@#$%^&*".to_string(),
+                ..default_config()
+            },
+        ];
+
+        for base in &base_configs {
+            let mut prev_entropy = 0.0;
+            for len in 1..=200 {
+                let mut cfg = base.clone();
+                cfg.length = len;
+                let ent = calculate_config_entropy(&cfg).unwrap();
+                assert!(
+                    ent >= prev_entropy - 1e-12,
+                    "entropy must be monotonic in length: len {} has {} < prev {}",
+                    len,
+                    ent,
+                    prev_entropy
+                );
+                prev_entropy = ent;
+            }
+        }
+    }
+
+    #[test]
+    fn test_min_length_for_entropy() {
+        let default_sizes = [26, 26, 10, 6];
+
+        // 100 bits requires 18 chars on default config
+        let len100 = min_length_for_entropy(&default_sizes, 100.0).unwrap();
+        assert_eq!(len100, 18);
+        assert!(calculate_partitioned_entropy(&default_sizes, 18) >= 100.0);
+        assert!(calculate_partitioned_entropy(&default_sizes, 17) < 100.0);
+
+        // 50 bits requires 10 chars
+        let len50 = min_length_for_entropy(&default_sizes, 50.0).unwrap();
+        assert_eq!(len50, 10);
+        assert!(calculate_partitioned_entropy(&default_sizes, 10) >= 50.0);
+        assert!(calculate_partitioned_entropy(&default_sizes, 9) < 50.0);
+
+        // Unreachable targets
+        assert_eq!(min_length_for_entropy(&[1], 10.0), None);
+        assert_eq!(min_length_for_entropy(&[1], 0.1), None);
+        assert_eq!(min_length_for_entropy(&[], 50.0), None);
+        assert_eq!(min_length_for_entropy(&default_sizes, f64::NAN), None);
+        assert_eq!(min_length_for_entropy(&default_sizes, 0.0), None);
+        assert_eq!(min_length_for_entropy(&default_sizes, -5.0), None);
+    }
+
+    #[test]
+    fn test_floor_entropy_and_boundary_rating() {
+        // 109.99 floors to 109.9 and rates "Strong"
+        let floored_strong = floor_entropy(109.99);
+        assert_eq!(floored_strong, 109.9);
+        assert_eq!(strength_rating(floored_strong), "Strong");
+
+        // 110.00 floors to 110.0 and rates "Very Strong"
+        let floored_vstrong = floor_entropy(110.00);
+        assert_eq!(floored_vstrong, 110.0);
+        assert_eq!(strength_rating(floored_vstrong), "Very Strong");
+
+        // 41.3594 floors to 41.3
+        assert_eq!(floor_entropy(41.3594), 41.3);
+
+        // Non-finite values
+        assert_eq!(floor_entropy(f64::NAN), 0.0);
+        assert_eq!(floor_entropy(-10.0), 0.0);
     }
 }

@@ -39,6 +39,22 @@ pub fn default_config() -> Config {
     }
 }
 
+/// Allocates character counts across active groups for partitioned generation.
+///
+/// For `length >= num_groups`, each group receives `length / num_groups` characters,
+/// and the first `length % num_groups` groups (in deterministic order: upper, lower,
+/// digits, symbols) receive one additional character.
+pub fn allocate_group_counts(length: usize, num_groups: usize) -> Vec<usize> {
+    if num_groups == 0 {
+        return Vec::new();
+    }
+    let base = length / num_groups;
+    let remainder = length % num_groups;
+    (0..num_groups)
+        .map(|g| if g < remainder { base + 1 } else { base })
+        .collect()
+}
+
 /// Generates a cryptographically secure random integer in the inclusive range `[min, max]`.
 ///
 /// If `min >= max`, returns `min` without panicking.
@@ -190,14 +206,10 @@ pub fn generate(cfg: &Config) -> Result<(String, usize), Error> {
     let mut pass: Vec<char> = Vec::with_capacity(cfg.length);
 
     if cfg.length >= num_groups {
-        let base = cfg.length / num_groups;
-        let remainder = cfg.length % num_groups;
+        let counts = allocate_group_counts(cfg.length, num_groups);
 
         for (g, group) in active_groups.iter().enumerate() {
-            let mut this_len = base;
-            if g < remainder {
-                this_len += 1;
-            }
+            let this_len = counts[g];
             let group_chars: Vec<char> = group.chars().collect();
             for _ in 0..this_len {
                 let idx = secure_random(0, group_chars.len() - 1);

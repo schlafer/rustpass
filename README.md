@@ -161,8 +161,8 @@ Display password entropy and strength analysis:
 ```bash
 rustpass -l 20 -E
 # Output:
-# Ksx5@R2O5iP_zE@a05_*
-# Entropy:   121.7 bits (Very Strong)
+# C*7xC_G3On1N4$5a!ow#
+# Entropy:   109.9 bits (Strong)
 # Shannon:   4.12 bits/char
 # Pool Size: 68
 ```
@@ -172,9 +172,9 @@ Batch generation with entropy display:
 ```bash
 rustpass -n 3 -E
 # Output:
-# v5!3!B5@JafN             [Entropy: 73.0 bits, Strength: Fair]
-# 3*CPuXx6_u_9             [Entropy: 73.0 bits, Strength: Fair]
-# !G03uW3Xg$!q             [Entropy: 73.0 bits, Strength: Fair]
+# g#x$Q1G05Q#o             [Entropy: 64.4 bits, Strength: Fair]
+# X!9#he$23FwI             [Entropy: 64.4 bits, Strength: Fair]
+# XR_njb*981*W             [Entropy: 64.4 bits, Strength: Fair]
 ```
 
 Or generate high-entropy batches:
@@ -182,9 +182,9 @@ Or generate high-entropy batches:
 ```bash
 rustpass -n 3 -l 20 -E
 # Output:
-# 9P_Ypc6_5!tOnH9N3*@z     [Entropy: 121.7 bits, Strength: Very Strong]
-# mK9$pL2#vR5@kL7*kL7#     [Entropy: 121.7 bits, Strength: Very Strong]
-# xT1*bN7!qZ3_bA4%Aq#8     [Entropy: 121.7 bits, Strength: Very Strong]
+# O#2q#2pZ_j7j#J5pU#7S     [Entropy: 109.9 bits, Strength: Strong]
+# 8yNX_05$Q0kJS_!q$9gh     [Entropy: 109.9 bits, Strength: Strong]
+# 4$L*7*mYYn0_F$td6V6p     [Entropy: 109.9 bits, Strength: Strong]
 ```
 
 ### 5. Policy Presets
@@ -253,10 +253,10 @@ Output:
   "count": 1,
   "passwords": [
     {
-      "value": "Aq#8Tz3LpR_4kL7*",
+      "value": "LBj6t4xS@p$M*3#8",
       "length": 16,
-      "entropy_bits": 97.4,
-      "shannon_entropy": 3.75,
+      "entropy_bits": 87.1,
+      "shannon_entropy": 4.0,
       "pool_size": 68,
       "strength_rating": "Strong"
     }
@@ -380,8 +380,8 @@ rustpass = { git = "https://github.com/schlafer/rustpass.git" }
 
 ```rust
 use rustpass::{
-    calculate_entropy, generate, generate_passphrase, strength_rating, Config, Error,
-    PassphraseConfig,
+    calculate_config_entropy, floor_entropy, generate, generate_passphrase, strength_rating,
+    Config, Error, PassphraseConfig,
 };
 
 fn main() -> Result<(), Error> {
@@ -392,11 +392,12 @@ fn main() -> Result<(), Error> {
         ..Config::default()
     };
     match generate(&cfg) {
-        Ok((password, pool_size)) => {
-            let entropy = calculate_entropy(&password, pool_size);
-            let rating = strength_rating(entropy);
+        Ok((password, _pool_size)) => {
+            let entropy = calculate_config_entropy(&cfg)?;
+            let displayed = floor_entropy(entropy);
+            let rating = strength_rating(displayed);
             println!("Generated: {}", password);
-            println!("Entropy: {:.1} bits ({})", entropy, rating);
+            println!("Entropy: {:.1} bits ({})", displayed, rating);
         }
         Err(Error::EmptyPool(msg)) => eprintln!("Pool configuration empty: {}", msg),
         Err(err) => eprintln!("Generation error: {}", err),
