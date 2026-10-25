@@ -22,7 +22,7 @@ A fast, cryptographically secure CLI password and memorable passphrase generator
 - **Batch Generation**: Generate multiple passwords at once (`-n 5` / `--count 5`).
 - **Script-Friendly & Quiet Mode**: Suppress trailing newlines (`-0`) and status messages (`-q` / `--quiet`) for clean piping into commands, variables, or files.
 - **Shell Completions & Man Pages**: Generate autocompletions (`--completions <shell>`) and troff manual pages (`--man`) out of the box.
-- **Memory Hygiene**: Actively wipes sensitive internal character buffers using volatile operations and zeroizes clipboard buffers via `zeroize`.
+- **Memory Hygiene**: Best-effort zeroization of internal character buffers and temporary secrets using the `zeroize` crate.
 - **Reusable Rust Crate**: Fully typed library API with structured error handling (`Error` enum) for integration into any Rust project.
 
 ---
@@ -149,7 +149,7 @@ rustpass -c
 # ✓ Copied to clipboard
 ```
 
-Copy directly without printing the secret to stdout (prevents terminal leakage and shoulder surfing):
+Copy directly to clipboard without printing to stdout (avoids echoing secrets in command history and stdout logs; note that when falling back to OSC 52, escape sequences still pass through the terminal):
 
 ```bash
 rustpass --copy-only
@@ -161,8 +161,8 @@ Display password entropy and strength analysis:
 ```bash
 rustpass -l 20 -E
 # Output:
-# Ksx5@R2O5iP_zE@a05_*
-# Entropy:   121.7 bits (Very Strong)
+# C*7xC_G3On1N4$5a!ow#
+# Entropy:   109.9 bits (Strong)
 # Shannon:   4.12 bits/char
 # Pool Size: 68
 ```
@@ -172,9 +172,9 @@ Batch generation with entropy display:
 ```bash
 rustpass -n 3 -E
 # Output:
-# v5!3!B5@JafN             [Entropy: 73.0 bits, Strength: Fair]
-# 3*CPuXx6_u_9             [Entropy: 73.0 bits, Strength: Fair]
-# !G03uW3Xg$!q             [Entropy: 73.0 bits, Strength: Fair]
+# g#x$Q1G05Q#o             [Entropy: 64.4 bits, Strength: Fair]
+# X!9#he$23FwI             [Entropy: 64.4 bits, Strength: Fair]
+# XR_njb*981*W             [Entropy: 64.4 bits, Strength: Fair]
 ```
 
 Or generate high-entropy batches:
@@ -182,9 +182,9 @@ Or generate high-entropy batches:
 ```bash
 rustpass -n 3 -l 20 -E
 # Output:
-# 9P_Ypc6_5!tOnH9N3*@z     [Entropy: 121.7 bits, Strength: Very Strong]
-# mK9$pL2#vR5@kL7*kL7#     [Entropy: 121.7 bits, Strength: Very Strong]
-# xT1*bN7!qZ3_bA4%Aq#8     [Entropy: 121.7 bits, Strength: Very Strong]
+# O#2q#2pZ_j7j#J5pU#7S     [Entropy: 109.9 bits, Strength: Strong]
+# 8yNX_05$Q0kJS_!q$9gh     [Entropy: 109.9 bits, Strength: Strong]
+# 4$L*7*mYYn0_F$td6V6p     [Entropy: 109.9 bits, Strength: Strong]
 ```
 
 ### 5. Policy Presets
@@ -253,10 +253,10 @@ Output:
   "count": 1,
   "passwords": [
     {
-      "value": "Aq#8Tz3LpR_4kL7*",
+      "value": "LBj6t4xS@p$M*3#8",
       "length": 16,
-      "entropy_bits": 97.4,
-      "shannon_entropy": 3.75,
+      "entropy_bits": 87.1,
+      "shannon_entropy": 4.0,
       "pool_size": 68,
       "strength_rating": "Strong"
     }
@@ -380,8 +380,8 @@ rustpass = { git = "https://github.com/schlafer/rustpass.git" }
 
 ```rust
 use rustpass::{
-    calculate_entropy, generate, generate_passphrase, strength_rating, Config, Error,
-    PassphraseConfig,
+    calculate_config_entropy, floor_entropy, generate, generate_passphrase, strength_rating,
+    Config, Error, PassphraseConfig,
 };
 
 fn main() -> Result<(), Error> {
@@ -392,11 +392,12 @@ fn main() -> Result<(), Error> {
         ..Config::default()
     };
     match generate(&cfg) {
-        Ok((password, pool_size)) => {
-            let entropy = calculate_entropy(&password, pool_size);
-            let rating = strength_rating(entropy);
+        Ok((password, _pool_size)) => {
+            let entropy = calculate_config_entropy(&cfg)?;
+            let displayed = floor_entropy(entropy);
+            let rating = strength_rating(displayed);
             println!("Generated: {}", password);
-            println!("Entropy: {:.1} bits ({})", entropy, rating);
+            println!("Entropy: {:.1} bits ({})", displayed, rating);
         }
         Err(Error::EmptyPool(msg)) => eprintln!("Pool configuration empty: {}", msg),
         Err(err) => eprintln!("Generation error: {}", err),
@@ -443,8 +444,9 @@ cargo build --release
 
 ## Security Considerations & Limitations
 
-- **Entropy Estimates:** The reported entropy (`-E`) is a theoretical upper-bound estimate calculated under the assumption of independent, uniform character selection from the effective pool ($L \times \log_2(pool)$). When character groups are partitioned (e.g. guaranteeing representation across groups), true keyspace size is slightly constrained. Shannon entropy reflects empirical character frequency diversity within the generated sample, not attacker guessability.
-- **Memory Hygiene:** RustPass uses volatile memory clearing and the `zeroize` crate to erase temporary character and clipboard buffers. However, memory cannot be guaranteed erased in all operating environments: heap reallocations, standard library `String` moves, terminal scrollback buffers, clipboard managers, or OS swap files may retain copies outside the application's boundary.
+- **Partitioned Entropy Model:** The reported entropy (`-E`) models the exact theoretical keyspace of the partitioned character generator when $L \ge k$, and provides the conservative min-entropy bound when $L < k$. Shannon entropy measures the empirical diversity and frequency distribution of characters within the generated string itself, not attacker guessability.
+- **Clipboard & Secret Handling:** `--copy-only` avoids printing secrets to stdout. However, external clipboard tools (`wl-copy`, `xclip`, `xsel`, `pbcopy`, `clip.exe`), clipboard history managers, and terminal emulators (when falling back to OSC 52) may retain copies of secrets. RustPass does not automatically clear the system clipboard after copying.
+- **Memory Hygiene Caveats:** RustPass uses `Zeroizing` and the `zeroize` crate to clear internal character buffers, intermediate joined strings, and JSON serialization buffers on drop. However, memory cannot be guaranteed completely erased across all environments: heap reallocations, serializer buffers, OS swap files, and standard library moves may retain transient copies outside the application's control.
 - **Randomness:** Randomness is strictly sourced from the operating system's cryptographic random number generator via the `rand` crate CSPRNG.
 
 ---
