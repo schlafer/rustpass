@@ -12,14 +12,18 @@ A fast, cryptographically secure CLI password and memorable passphrase generator
 - **Cryptographically Secure**: Powered by OS CSPRNG (`rand` crate) for high-entropy randomness.
 - **Fair Character Distribution**: Guarantees characters across enabled groups and shuffles using Fisher–Yates.
 - **Memorable Passphrases**: Diceware-style passphrases using the official EFF short wordlist (`-p` / `--passphrase`).
+- **Policy Presets**: Built-in policies (`--preset strict`, `alphanumeric`, `memorable`) for instant best-practice generation.
+- **Minimum Entropy Targeting**: Automatically calculates password length or passphrase word count to guarantee target security bits (`--min-entropy`).
 - **Granular Character Controls**: Disable symbols, numbers, uppercase, or lowercase; or restrict to alphanumeric only.
 - **Exclude Ambiguous Characters**: Filter out confusing lookalikes like `0`, `O`, `1`, `l`, `I`, and `|`.
-- **Clipboard Integration**: Seamlessly copy passwords via `-c` / `--copy` across Linux, macOS, and Windows with OSC 52 terminal fallback.
+- **Clipboard Integration**: Seamlessly copy passwords via `-c` / `--copy` or `--copy-only` across Linux, macOS, and Windows with OSC 52 terminal fallback.
 - **Strength & Entropy Analysis**: Real-time theoretical keyspace and Shannon entropy calculation with human-readable ratings (`-E` / `--entropy`).
+- **Structured JSON Output**: Machine-readable JSON output (`-f json`) for tooling, CI pipelines, and scripting.
 - **Batch Generation**: Generate multiple passwords at once (`-n 5` / `--count 5`).
-- **Script-Friendly**: Suppress trailing newlines (`-0` / `--no-newline`) for clean piping into commands, variables, or files.
+- **Script-Friendly & Quiet Mode**: Suppress trailing newlines (`-0`) and status messages (`-q` / `--quiet`) for clean piping into commands, variables, or files.
+- **Shell Completions & Man Pages**: Generate autocompletions (`--completions <shell>`) and troff manual pages (`--man`) out of the box.
 - **Memory Hygiene**: Actively wipes sensitive internal character buffers using volatile operations and zeroizes clipboard buffers via `zeroize`.
-- **Reusable Rust Crate**: Can be imported as a library into any Rust application.
+- **Reusable Rust Crate**: Fully typed library API with structured error handling (`Error` enum) for integration into any Rust project.
 
 ---
 
@@ -27,7 +31,13 @@ A fast, cryptographically secure CLI password and memorable passphrase generator
 
 ### Via `cargo install`
 
-Install directly from the local repository directory:
+Install directly from the Git repository:
+
+```bash
+cargo install --git https://github.com/schlafer/rustpass.git
+```
+
+Or install from a local checkout:
 
 ```bash
 cargo install --path .
@@ -132,10 +142,17 @@ rustpass -p -w 5 --sep "_" --capitalize --include-number
 
 ### 4. Clipboard & Entropy
 
-Generate and copy directly to system clipboard:
+Generate and copy directly to the system clipboard:
 
 ```bash
 rustpass -c
+# ✓ Copied to clipboard
+```
+
+Copy directly without printing the secret to stdout (prevents terminal leakage and shoulder surfing):
+
+```bash
+rustpass --copy-only
 # ✓ Copied to clipboard
 ```
 
@@ -146,7 +163,7 @@ rustpass -l 20 -E
 # Output:
 # Ksx5@R2O5iP_zE@a05_*
 # Entropy:   121.7 bits (Very Strong)
-# Shannon:   3.92 bits/char
+# Shannon:   4.12 bits/char
 # Pool Size: 68
 ```
 
@@ -155,9 +172,19 @@ Batch generation with entropy display:
 ```bash
 rustpass -n 3 -E
 # Output:
-# Aq#8Tz3LpR_4             [Entropy: 73.0 bits, Strength: Very Strong]
-# mK9$pL2#vR5@             [Entropy: 73.0 bits, Strength: Very Strong]
-# xT1*bN7!qZ3_             [Entropy: 73.0 bits, Strength: Very Strong]
+# v5!3!B5@JafN             [Entropy: 73.0 bits, Strength: Fair]
+# 3*CPuXx6_u_9             [Entropy: 73.0 bits, Strength: Fair]
+# !G03uW3Xg$!q             [Entropy: 73.0 bits, Strength: Fair]
+```
+
+Or generate high-entropy batches:
+
+```bash
+rustpass -n 3 -l 20 -E
+# Output:
+# 9P_Ypc6_5!tOnH9N3*@z     [Entropy: 121.7 bits, Strength: Very Strong]
+# mK9$pL2#vR5@kL7*kL7#     [Entropy: 121.7 bits, Strength: Very Strong]
+# xT1*bN7!qZ3_bA4%Aq#8     [Entropy: 121.7 bits, Strength: Very Strong]
 ```
 
 ### 5. Policy Presets
@@ -272,9 +299,22 @@ Assign to a shell variable without trailing newline:
 PASSWORD=$(rustpass -l 16 -0)
 ```
 
+Suppress diagnostics and status messages for clean scripting:
+
+```bash
+PASSWORD=$(rustpass -l 24 -0 -q)
+```
+
+Copy directly to clipboard from scripts without terminal output:
+
+```bash
+rustpass -l 32 --copy-only -q
+```
+
 Pipe directly into `sha256sum` or files:
 
 ```bash
+rustpass -l 32 -0 | sha256sum
 rustpass -l 32 -0 > secret.key
 ```
 
@@ -292,29 +332,29 @@ rustpass -n 20 > passwords.txt
 | --- | --- | --- | --- |
 | `--length <int>` | `-l` | Length of generated password | `12` |
 | `--count <int>` | `-n` | Number of passwords to generate | `1` |
-| `--preset <preset>` | | Policy preset (`strict`, `alphanumeric`, `memorable`) | |
-| `--min-entropy <float>` | | Minimum required keyspace entropy in bits | |
+| `--preset <preset>` | | Policy preset (`strict`, `alphanumeric`, `memorable`) | `None` |
+| `--min-entropy <float>` | | Minimum required theoretical keyspace entropy in bits | `None` |
 | `--format <format>` | `-f` | Output format (`text` or `json`) | `text` |
 | `--quiet` | `-q` | Suppress status and diagnostic messages on stderr | `false` |
-| `--no-symbols` | `-S` | Exclude special characters (`!@#$*_`) | `false` |
-| `--no-digits` | `-D` | Exclude numeric digits (`0-9`) | `false` |
 | `--no-upper` | `-U` | Exclude uppercase letters (`A-Z`) | `false` |
 | `--no-lower` | `-L` | Exclude lowercase letters (`a-z`) | `false` |
+| `--no-digits` | `-D` | Exclude numeric digits (`0-9`) | `false` |
+| `--no-symbols` | `-S` | Exclude special characters (`!@#$*_`) | `false` |
 | `--only-alphanumeric` | `-A` | Use only letters and numbers | `false` |
 | `--symbols <str>` | | Custom symbol set | `"!@#$*_"` |
-| `--exclude-ambiguous` | `-a` | Exclude lookalike characters (`0O1lI\|`) | `false` |
+| `--exclude-ambiguous` | `-a` | Exclude lookalike characters (`0`, `O`, `1`, `l`, `I`, `\|`) | `false` |
 | `--exclude <str>` | `-e` | Exclude specific characters | `""` |
 | `--passphrase` | `-p` | Generate memorable passphrase | `false` |
 | `--words <int>` | `-w` | Word count for passphrase | `4` |
 | `--separator <str>` | `--sep` | Word separator for passphrase | `"-"` |
 | `--capitalize` | | Capitalize words in passphrase | `false` |
-| `--include-number` | | Append random number to passphrase | `false` |
+| `--include-number` | | Append random number (`00-99`) to passphrase | `false` |
 | `--copy` | `-c` | Copy result to system clipboard | `false` |
 | `--copy-only` | | Copy to clipboard only, suppressing stdout output | `false` |
-| `--entropy` | `-E` | Display entropy and strength | `false` |
+| `--entropy` | `-E` | Display theoretical entropy, Shannon entropy, and strength rating | `false` |
 | `--no-newline` | `-0` | Suppress trailing newline | `false` |
-| `--completions <shell>` | | Generate completions (`bash`, `elvish`, `fish`, `powershell`, `zsh`) | |
-| `--man` | | Output manual page in roff format | |
+| `--completions <shell>` | | Generate completions (`bash`, `elvish`, `fish`, `powershell`, `zsh`) | `None` |
+| `--man` | | Output manual page in roff format | `None` |
 | `--version` | `-v` | Display version information | |
 | `--help` | `-h` | Display help screen | |
 
@@ -322,7 +362,21 @@ rustpass -n 20 > passwords.txt
 
 ## Using as a Rust Library
 
-You can use `rustpass` directly in your Rust projects by adding it to `Cargo.toml`:
+Add `rustpass` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+rustpass = "1.1"
+```
+
+Or depend directly on the git repository:
+
+```toml
+[dependencies]
+rustpass = { git = "https://github.com/schlafer/rustpass.git" }
+```
+
+### Library Example
 
 ```rust
 use rustpass::{
