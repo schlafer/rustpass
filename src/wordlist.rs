@@ -124,3 +124,26 @@ pub const DEFAULT_WORDLIST: &[&str] = &[
     "yelp", "yield", "yo-yo", "yodel", "yoga", "yoyo", "yummy", "zebra", "zero", "zesty", "zippy",
     "zone", "zoom",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_default_wordlist_invariants() {
+        assert_eq!(DEFAULT_WORDLIST.len(), 1296);
+        let mut seen = HashSet::new();
+        for &word in DEFAULT_WORDLIST {
+            assert!(
+                !word.trim().is_empty(),
+                "word must not be empty or whitespace"
+            );
+            assert!(
+                seen.insert(word),
+                "wordlist contains duplicate entry: {}",
+                word
+            );
+        }
+    }
+}

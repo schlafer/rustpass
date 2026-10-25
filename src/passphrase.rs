@@ -112,22 +112,26 @@ mod tests {
 
     #[test]
     fn test_passphrase_default() {
-        let cfg = PassphraseConfig::default();
+        let cfg = PassphraseConfig {
+            separator: ".".to_string(),
+            ..Default::default()
+        };
         let (pp, wl_size) = generate_passphrase(&cfg).unwrap();
-        let expected_parts = 4 + pp.matches("yo-yo").count();
-        assert_eq!(pp.split('-').count(), expected_parts);
+        assert_eq!(pp.split('.').count(), 4);
         assert_eq!(wl_size, 1296);
+        assert_eq!(DEFAULT_PASSPHRASE_SEPARATOR, "-");
+        assert_eq!(DEFAULT_PASSPHRASE_WORD_COUNT, 4);
     }
 
     #[test]
     fn test_passphrase_custom_words() {
         let cfg = PassphraseConfig {
             word_count: 6,
+            separator: ".".to_string(),
             ..Default::default()
         };
         let (pp, _) = generate_passphrase(&cfg).unwrap();
-        let expected_parts = 6 + pp.matches("yo-yo").count();
-        assert_eq!(pp.split('-').count(), expected_parts);
+        assert_eq!(pp.split('.').count(), 6);
     }
 
     #[test]

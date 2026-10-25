@@ -1042,17 +1042,21 @@ mod tests {
 
     #[test]
     fn test_execute_preset_memorable() {
-        let args = Args::try_parse_from(["rustpass", "--preset", "memorable"]).unwrap();
+        let args = Args::try_parse_from(["rustpass", "--preset", "memorable", "--separator", "."])
+            .unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let res = execute_args(&args, &mut stdout, &mut stderr);
         assert_eq!(res, Ok(()));
         let out = String::from_utf8(stdout).unwrap().trim().to_string();
-        let parts: Vec<&str> = out.split('-').collect();
+        let parts: Vec<&str> = out.split('.').collect();
         assert_eq!(parts.len(), 6); // 5 words + 1 number
         for w in &parts[..5] {
             assert!(w.chars().next().unwrap().is_uppercase());
         }
+
+        // Verify default separator constant
+        assert_eq!(crate::passphrase::DEFAULT_PASSPHRASE_SEPARATOR, "-");
     }
 
     #[test]
@@ -1081,13 +1085,15 @@ mod tests {
     #[test]
     fn test_execute_min_entropy_passphrase() {
         // EFF wordlist = 1296 -> log2(1296) ≈ 10.34 bits/word. 50 bits requires ceil(50/10.34) = 5 words.
-        let args = Args::try_parse_from(["rustpass", "-p", "--min-entropy", "50"]).unwrap();
+        let args =
+            Args::try_parse_from(["rustpass", "-p", "--separator", ".", "--min-entropy", "50"])
+                .unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let res = execute_args(&args, &mut stdout, &mut stderr);
         assert_eq!(res, Ok(()));
         let out = String::from_utf8(stdout).unwrap().trim().to_string();
-        let parts: Vec<&str> = out.split('-').collect();
+        let parts: Vec<&str> = out.split('.').collect();
         assert_eq!(parts.len(), 5);
     }
 

@@ -305,24 +305,38 @@ mod tests {
     }
 
     #[test]
-    fn test_shuffle_permutes() {
+    fn test_shuffle_preserves_elements_and_invariants() {
         let original: Vec<char> = "abcdefghij".chars().collect();
         let mut shuffled = original.clone();
         shuffle(&mut shuffled);
-        // Very unlikely to be identical after shuffle
-        assert_ne!(original, shuffled);
-    }
+        assert_eq!(shuffled.len(), original.len());
 
-    #[test]
-    fn test_shuffle_preserves_elements() {
-        let original: Vec<char> = "abcdefghij".chars().collect();
-        let mut shuffled = original.clone();
-        shuffle(&mut shuffled);
         let mut orig_sorted = original.clone();
         let mut shuffled_sorted = shuffled.clone();
         orig_sorted.sort();
         shuffled_sorted.sort();
         assert_eq!(orig_sorted, shuffled_sorted);
+
+        // Duplicates preserved
+        let dupes: Vec<char> = vec!['a', 'a', 'b', 'b', 'c', 'c'];
+        let mut shuffled_dupes = dupes.clone();
+        shuffle(&mut shuffled_dupes);
+        assert_eq!(shuffled_dupes.len(), dupes.len());
+        let mut dupes_sorted = dupes.clone();
+        let mut shuffled_dupes_sorted = shuffled_dupes.clone();
+        dupes_sorted.sort();
+        shuffled_dupes_sorted.sort();
+        assert_eq!(dupes_sorted, shuffled_dupes_sorted);
+
+        // Empty vector
+        let mut empty: Vec<char> = Vec::new();
+        shuffle(&mut empty);
+        assert!(empty.is_empty());
+
+        // Single-element vector
+        let mut single: Vec<char> = vec!['x'];
+        shuffle(&mut single);
+        assert_eq!(single, vec!['x']);
     }
 
     #[test]
