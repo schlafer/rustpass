@@ -121,8 +121,11 @@ rustpass -l 16 -e "\"'/\\"
 Use a custom symbol set:
 
 ```bash
-rustpass -l 16 --symbols "!@#$%"
+rustpass -l 16 --symbols '!@#$%'
 ```
+
+> [!TIP]
+> **Shell Quoting**: Always wrap custom symbol strings containing characters like `!`, `$`, or `*` in **single quotes** (`'...'`) rather than double quotes (`"..."`). In shells like `zsh` or interactive `bash`, double quotes allow `!` to trigger history expansion (e.g. `zsh: event not found: @#`), `$` to trigger variable substitution, and unquoted `*` to trigger filename globbing.
 
 ### 3. Memorable Passphrases (Diceware Style)
 
@@ -324,6 +327,12 @@ Batch generation into a text file:
 rustpass -n 20 > passwords.txt
 ```
 
+Safe quoting for special symbols (prevents history expansion `!` and variable expansion `$`):
+
+```bash
+rustpass -l 16 --symbols '!@#$%'
+```
+
 ---
 
 ## CLI Flag Reference
@@ -341,7 +350,7 @@ rustpass -n 20 > passwords.txt
 | `--no-digits` | `-D` | Exclude numeric digits (`0-9`) | `false` |
 | `--no-symbols` | `-S` | Exclude special characters (`!@#$*_`) | `false` |
 | `--only-alphanumeric` | `-A` | Use only letters and numbers | `false` |
-| `--symbols <str>` | | Custom symbol set | `"!@#$*_"` |
+| `--symbols <str>` | | Custom symbol set | `'!@#$*_'` |
 | `--exclude-ambiguous` | `-a` | Exclude lookalike characters (`0`, `O`, `1`, `l`, `I`, `\|`) | `false` |
 | `--exclude <str>` | `-e` | Exclude specific characters | `""` |
 | `--passphrase` | `-p` | Generate memorable passphrase | `false` |
